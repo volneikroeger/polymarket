@@ -1,0 +1,28 @@
+runtime:
+  paper: false
+
+refresh:
+  universeRefreshMs: 600000
+  monitorPollMs: 4000
+  maxMarketsMonitored: 30
+
+filter:
+  maxDisplayedSum: 1.02
+
+  maxSpreadAbs: 0.05
+  topN: 10
+  minAskDepthTopN: 50
+
+  minBestAsk: 0.02
+  maxBestAsk: 0.98
+
+arb:
+  edgeAbs: 0.005
+  legNotionalUsdc: 1
+  maxConcurrentOpps: 1
+  orderTtlMs: 8000
+
+risk:
+  maxDailyNotionalUsdc: 25
+  maxConsecutiveFailures: 5
+  cooldownAfterHaltMs: 300000
