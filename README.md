@@ -37,3 +37,4 @@ npm run dev
 
 Next: implement a real signal source (subgraph/on-chain) and convert detected changes into `CopySignal`s.
 # polymarket
+# polymarket
