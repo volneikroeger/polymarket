@@ -17,7 +17,8 @@
     "quant-bot": "tsx src/quantBot.ts",
     "arb-scanner": "tsx src/arbScanner.ts",
     "arb-scanner-v2": "tsx src/arbScannerV2.ts",
-    "arb-scanner-v23": "tsx src/arbScannerV23.ts"
+    "arb-scanner-v23": "tsx src/arbScannerV23.ts",
+    "compare-traders": "tsx src/compareTraders.ts"
   },
   "keywords": [],
   "author": "",
