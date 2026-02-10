@@ -1,0 +1,637 @@
+import { ClobClient } from '@polymarket/clob-client';
+
+type ApiCreds = {
+  key: string;
+  secret: string;
+  passphrase: string;
+};
+import { Wallet } from 'ethers';
+import { logger } from '../logger.js';
+import type { CopySignal } from '../signals/types.js';
+
+type CreateParams = {
+  enableTrading: boolean;
+  fixedUsdcPerTrade: number;
+  maxPriceMove: number;
+  marketable?: boolean;
+  allowMarkets?: string[];
+  denyMarkets?: string[];
+  maxUsdcPerTrade?: number;
+  maxOpenUsdcPerMarket?: number;
+  maxActiveMarkets?: number;
+
+  // Interpreted as MAX DAILY LOSS (USDC). Only blocks when realized PnL is negative beyond this.
+  maxDailyLossUsdc?: number;
+
+  // Optional cap for total daily notional (0/undefined disables).
+  maxDailyNotionalUsdc?: number;
+};
+
+type OpenPosition = {
+  marketKey: string;
+  assetId: string;
+  outcome?: string;
+  notionalUsdc: number;
+  shares: number; // approximate filled shares tracked by our own order sizes
+  entryPrice: number; // approx avg entry
+  bestPrice: number;
+  openedAtMs: number;
+  buysCount: number;
+  lastBuyAtMs: number;
+  lastBuyPrice: number;
+};
+
+export class PolymarketExecutor {
+  private readonly marketable: boolean;
+  private readonly allowMarkets: string[];
+  private readonly denyMarkets: string[];
+  private readonly maxUsdcPerTrade: number;
+  private readonly maxOpenUsdcPerMarket: number;
+  private readonly maxActiveMarkets: number;
+  private readonly maxDailyLossUsdc: number;
+  private readonly maxDailyNotionalUsdc: number; // 0 disables
+
+  // Microstructure / execution guards
+  private readonly maxSpreadAbs: number;
+  private readonly maxSpreadBps: number;
+
+  // Circuit breaker
+  private readonly maxConsecutiveFailures: number;
+
+  // Entry throttles / anti-overtrading
+  private readonly maxBuysPerMarket: number;
+  private readonly buyCooldownMs: number;
+  private readonly buyMinPriceDeltaAbs: number;
+
+  // Simple in-memory guards (approximate).
+  private openNotionalByMarket = new Map<string, number>();
+  private openPositions = new Map<string, OpenPosition>();
+  private dailyNotionalUsdc = 0;
+  private dailyRealizedPnlUsdc = 0;
+  private dayKey = '';
+  private dailyWindowStartMs = Date.now();
+  private consecutiveOrderFailures = 0;
+  private tradingHalted = false;
+
+  private constructor(
+    private readonly client: ClobClient,
+    private readonly enableTrading: boolean,
+    private readonly fixedUsdcPerTrade: number,
+    private readonly maxPriceMove: number,
+    params: CreateParams
+  ) {
+    this.marketable = params.marketable ?? false;
+    this.allowMarkets = (params.allowMarkets ?? []).map((s) => s.toLowerCase());
+    this.denyMarkets = (params.denyMarkets ?? []).map((s) => s.toLowerCase());
+    this.maxUsdcPerTrade = params.maxUsdcPerTrade ?? 25;
+    this.maxOpenUsdcPerMarket = params.maxOpenUsdcPerMarket ?? 100;
+    this.maxActiveMarkets = params.maxActiveMarkets ?? 10;
+
+    this.maxDailyLossUsdc = params.maxDailyLossUsdc ?? 50;
+    this.maxDailyNotionalUsdc = params.maxDailyNotionalUsdc ?? 0;
+
+    this.dayKey = this.getDayKey();
+
+    this.maxSpreadAbs = Number(process.env.MAX_SPREAD_ABS ?? '0'); // 0 disables
+    this.maxSpreadBps = Number(process.env.MAX_SPREAD_BPS ?? '0'); // 0 disables
+
+    this.maxConsecutiveFailures = Number(process.env.MAX_CONSECUTIVE_ORDER_FAILURES ?? '3');
+
+    // One-position-per-market v2: allow N buys per market (default 1). Backward compatible with
+    // ONE_POSITION_PER_MARKET=true.
+    const rawOpm = String(process.env.ONE_POSITION_PER_MARKET ?? '').trim().toLowerCase();
+    const envMaxBuys = Number(process.env.MAX_BUYS_PER_MARKET ?? '');
+    let maxBuys = 1;
+    if (Number.isFinite(envMaxBuys) && envMaxBuys > 0) {
+      maxBuys = Math.floor(envMaxBuys);
+    } else if (rawOpm === 'true') {
+      maxBuys = 1;
+    } else if (rawOpm && rawOpm !== 'false') {
+      const n = Number(rawOpm);
+      if (Number.isFinite(n) && n > 0) maxBuys = Math.floor(n);
+    }
+    this.maxBuysPerMarket = Math.max(1, maxBuys);
+
+    // Anti-duplicate guard when a trader spams near-identical BUYs.
+    this.buyCooldownMs = Number(process.env.BUY_COOLDOWN_MS ?? String(60 * 1000));
+    this.buyMinPriceDeltaAbs = Number(process.env.BUY_MIN_PRICE_DELTA_ABS ?? '0');
+  }
+
+  private getDayKey(nowMs = Date.now()): string {
+    // Use Sao Paulo day boundary by default (can override with TZ env if desired)
+    const tz = process.env.EXEC_DAILY_TZ ?? 'America/Sao_Paulo';
+    const fmt = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' });
+    return fmt.format(new Date(nowMs));
+  }
+
+  private resetDailyIfNeeded(nowMs = Date.now()) {
+    const dk = this.getDayKey(nowMs);
+    if (this.dayKey && dk === this.dayKey) return;
+
+    const prev = this.dayKey;
+    this.dayKey = dk;
+    this.dailyWindowStartMs = nowMs;
+    this.dailyNotionalUsdc = 0;
+    this.dailyRealizedPnlUsdc = 0;
+
+    if (prev) {
+      logger.warn({ prevDayKey: prev, newDayKey: dk }, 'daily rollover (executor)');
+    }
+  }
+
+  static async createFromEnv(params: CreateParams): Promise<PolymarketExecutor> {
+    const host = process.env.CLOB_HOST ?? 'https://clob.polymarket.com';
+    const chainId = Number(process.env.CHAIN_ID ?? '137');
+
+    const privateKey = process.env.PRIVATE_KEY;
+    if (!privateKey) {
+      throw new Error('Missing PRIVATE_KEY in env');
+    }
+
+    const signatureType = Number(process.env.SIGNATURE_TYPE ?? '0');
+    const funder = process.env.FUNDER && process.env.FUNDER.trim() ? process.env.FUNDER.trim() : undefined;
+
+    const signer = new Wallet(privateKey);
+
+    logger.info(
+      {
+        signer: signer.address,
+        signatureType,
+        funder,
+      },
+      'polymarket executor signer config'
+    );
+
+    // If user supplied L2 creds, use them; otherwise derive.
+    let creds: ApiCreds | undefined;
+    if (process.env.POLY_API_KEY && process.env.POLY_API_SECRET && process.env.POLY_API_PASSPHRASE) {
+      // clob-client expects ApiCreds as { key, secret, passphrase }
+      // (NOT { apiKey, ... }). If "key" is missing, POLY_API_KEY won't be sent and you'll get 401.
+      creds = {
+        key: process.env.POLY_API_KEY,
+        secret: process.env.POLY_API_SECRET,
+        passphrase: process.env.POLY_API_PASSPHRASE,
+      } as any;
+    }
+
+    const useServerTime = process.env.USE_SERVER_TIME === 'true';
+    const client = new ClobClient(host, chainId, signer, creds, signatureType as any, funder, undefined, useServerTime);
+
+    if (!creds) {
+      logger.info('Deriving Polymarket API key (L2 creds) via L1...');
+      const derived: any = await client.createOrDeriveApiKey();
+      // clob-client's error handler returns objects that may not throw; sometimes the
+      // error payload becomes { key: undefined, secret: undefined, passphrase: undefined }.
+      const missing = !derived?.key || !derived?.secret || !derived?.passphrase;
+      if (!derived || derived.error || missing) {
+        throw new Error(
+          `Failed to derive Polymarket API creds: ${derived?.error ?? 'missing key/secret/passphrase (see CLOB Client request error above)'}`
+        );
+      }
+      logger.info('Derived Polymarket API creds (stored only in memory). Consider exporting to env for stability.');
+      // Re-init with creds for L2 methods.
+      const client2 = new ClobClient(host, chainId, signer, derived, signatureType as any, funder, undefined, useServerTime);
+
+      if (process.env.VERIFY_L2 === 'true') {
+        const resp: any = await client2.getApiKeys();
+        if (resp?.error) {
+          throw new Error(`Polymarket L2 credential check failed (derived creds): ${resp.error} (status ${resp.status ?? 'n/a'})`);
+        }
+        logger.info('Verified Polymarket L2 API creds (derived creds; getApiKeys succeeded).');
+      }
+
+      return new PolymarketExecutor(client2, params.enableTrading, params.fixedUsdcPerTrade, params.maxPriceMove, params);
+    }
+
+    // Optional: verify L2 creds are valid without placing orders.
+    if (process.env.VERIFY_L2 === 'true') {
+      const resp: any = await client.getApiKeys();
+      if (resp?.error) {
+        throw new Error(`Polymarket L2 credential check failed: ${resp.error} (status ${resp.status ?? 'n/a'})`);
+      }
+      logger.info('Verified Polymarket L2 API creds (getApiKeys succeeded).');
+    }
+
+    return new PolymarketExecutor(client, params.enableTrading, params.fixedUsdcPerTrade, params.maxPriceMove, params);
+  }
+
+  /**
+   * Execute a copy signal.
+   * NOTE: This is intentionally conservative and incomplete until we finalize the signal source.
+   */
+  getOpenPositions(): OpenPosition[] {
+    return [...this.openPositions.values()];
+  }
+
+  updateBestPrice(marketKey: string, bestPrice: number) {
+    const key = marketKey.toLowerCase();
+    const cur = this.openPositions.get(key);
+    if (!cur) return;
+    if (bestPrice > cur.bestPrice) {
+      this.openPositions.set(key, { ...cur, bestPrice });
+    }
+  }
+
+  async getMidpoint(assetId: string): Promise<number | null> {
+    try {
+      const mid: any = await (this.client as any).getMidpoint?.(assetId);
+      const v = Number(mid?.midpoint ?? mid?.price ?? mid);
+      if (!Number.isFinite(v) || v <= 0) return null;
+      return v;
+    } catch {
+      return null;
+    }
+  }
+
+  hasOpenPosition(marketKey: string): boolean {
+    return (this.openPositions.get(marketKey.toLowerCase())?.notionalUsdc ?? 0) > 0;
+  }
+
+  // (removed) legacy resetDailyIfNeeded(nowMs:number) — replaced by timezone dayKey rollover.
+
+  private marketAllowed(signal: CopySignal): boolean {
+    const key = `${signal.market ?? ''} ${signal.assetId ?? ''}`.toLowerCase();
+    if (this.denyMarkets.some((m) => key.includes(m.toLowerCase()))) return false;
+    if (this.allowMarkets.length === 0) return true;
+    return this.allowMarkets.some((m) => key.includes(m.toLowerCase()));
+  }
+
+  private haltTrading(reason: string, context?: any) {
+    this.tradingHalted = true;
+    logger.error({ reason, ...(context ? { context } : {}) }, 'CIRCUIT BREAKER: trading halted for this process');
+  }
+
+  async executeSignal(signal: CopySignal) {
+    if (!this.enableTrading) {
+      logger.warn('Trading disabled (ENABLE_TRADING=false or paper mode)');
+      return;
+    }
+    if (this.tradingHalted) {
+      logger.error({ trader: signal.trader, market: signal.market, assetId: signal.assetId }, 'trading halted (circuit breaker tripped); skipping');
+      return;
+    }
+
+    if (!this.marketAllowed(signal)) {
+      logger.warn({ market: signal.market, assetId: signal.assetId }, 'market not allowed (allow/deny list)');
+      return;
+    }
+
+    // Never attempt to SELL unless we believe we have an open position for this market.
+    // When mirroring raw TRADE events, we can see trader SELLs for markets we never entered.
+    if (String(signal.side).toUpperCase() === 'SELL') {
+      const key = String(signal.market ?? '').toLowerCase();
+      const pos = this.openPositions.get(key);
+      if (!pos || pos.notionalUsdc <= 0) {
+        logger.warn({ trader: signal.trader, market: signal.market, assetId: signal.assetId }, 'skipping SELL: no open position');
+        return;
+      }
+      if (pos.assetId && String(pos.assetId) !== String(signal.assetId)) {
+        logger.warn(
+          { trader: signal.trader, market: signal.market, assetId: signal.assetId, posAssetId: pos.assetId },
+          'skipping SELL: assetId mismatch vs tracked position'
+        );
+        return;
+      }
+    }
+
+    this.resetDailyIfNeeded(Date.now());
+
+    // Anti-overtrading: allow at most N BUYs per market (default 1). If already in this market,
+    // only allow an additional BUY when it is sufficiently separated by time and/or price.
+    if (String(signal.side).toUpperCase() === 'BUY') {
+      const key = String(signal.market ?? '').toLowerCase();
+      const pos = this.openPositions.get(key);
+      if (pos && pos.notionalUsdc > 0) {
+        if (pos.buysCount >= this.maxBuysPerMarket) {
+          logger.warn(
+            { trader: signal.trader, market: signal.market, assetId: signal.assetId, buysCount: pos.buysCount, maxBuysPerMarket: this.maxBuysPerMarket },
+            'skipping BUY: max buys per market reached'
+          );
+          return;
+        }
+
+        const nowMs = Date.now();
+        const sinceMs = nowMs - (pos.lastBuyAtMs || pos.openedAtMs);
+        if (this.buyCooldownMs > 0 && sinceMs < this.buyCooldownMs) {
+          logger.warn(
+            { trader: signal.trader, market: signal.market, assetId: signal.assetId, sinceMs, buyCooldownMs: this.buyCooldownMs },
+            'skipping BUY: cooldown'
+          );
+          return;
+        }
+
+        const p = Number(signal.price);
+        if (this.buyMinPriceDeltaAbs > 0 && Number.isFinite(p) && Number.isFinite(pos.lastBuyPrice)) {
+          const d = Math.abs(p - pos.lastBuyPrice);
+          if (d < this.buyMinPriceDeltaAbs) {
+            logger.warn(
+              { trader: signal.trader, market: signal.market, assetId: signal.assetId, delta: d, buyMinPriceDeltaAbs: this.buyMinPriceDeltaAbs },
+              'skipping BUY: price too similar to last buy'
+            );
+            return;
+          }
+        }
+      }
+    }
+
+    this.resetDailyIfNeeded();
+
+    const rawNotional = signal.notionalUsdc ?? this.fixedUsdcPerTrade;
+    const notional = Math.min(rawNotional, this.maxUsdcPerTrade);
+
+    if (notional <= 0) return;
+
+    // Daily LOSS enforcement: only stop when we're net down beyond maxDailyLossUsdc.
+    if (this.dailyRealizedPnlUsdc <= -Math.abs(this.maxDailyLossUsdc)) {
+      logger.error(
+        {
+          dayKey: this.dayKey,
+          dailyRealizedPnlUsdc: this.dailyRealizedPnlUsdc,
+          maxDailyLossUsdc: this.maxDailyLossUsdc,
+        },
+        'daily loss limit reached (blocking new orders)'
+      );
+      return;
+    }
+
+    // Optional daily NOTIONAL cap (0 disables).
+    if (this.maxDailyNotionalUsdc > 0 && this.dailyNotionalUsdc + notional > this.maxDailyNotionalUsdc) {
+      logger.error(
+        {
+          dayKey: this.dayKey,
+          dailyNotionalUsdc: this.dailyNotionalUsdc,
+          attempted: notional,
+          maxDailyNotionalUsdc: this.maxDailyNotionalUsdc,
+        },
+        'daily notional cap reached (blocking new orders)'
+      );
+      return;
+    }
+
+    const price = signal.price;
+    if (!price || price <= 0) {
+      throw new Error('Signal missing price; cannot size shares safely');
+    }
+
+    // Orderbook / spread safety: avoid illiquid markets that will eat us in spread.
+    // We also use this to discover tick_size / neg_risk dynamically instead of hardcoding.
+    let tickSizeStr: string | undefined;
+    let negRisk: boolean | undefined;
+    let bestBid: number | undefined;
+    let bestAsk: number | undefined;
+    let midFromBook: number | undefined;
+
+    if (this.maxSpreadAbs > 0 || this.maxSpreadBps > 0) {
+      try {
+        const book: any = await (this.client as any).getOrderBook?.(signal.assetId);
+        tickSizeStr = String(book?.tick_size ?? '0.01');
+        negRisk = Boolean(book?.neg_risk ?? false);
+
+        const bids = Array.isArray(book?.bids) ? book.bids : [];
+        const asks = Array.isArray(book?.asks) ? book.asks : [];
+        bestBid = bids.length ? Math.max(...bids.map((b: any) => Number(b.price)).filter((n: number) => Number.isFinite(n))) : NaN;
+        bestAsk = asks.length ? Math.min(...asks.map((a: any) => Number(a.price)).filter((n: number) => Number.isFinite(n))) : NaN;
+
+        if (!Number.isFinite(bestBid) || !Number.isFinite(bestAsk) || (bestBid as number) <= 0 || (bestAsk as number) <= 0) {
+          logger.warn({ assetId: signal.assetId }, 'skipping: empty/invalid orderbook');
+          return;
+        }
+
+        const spread = (bestAsk as number) - (bestBid as number);
+        midFromBook = ((bestAsk as number) + (bestBid as number)) / 2;
+        const spreadBps = (midFromBook as number) > 0 ? (spread / (midFromBook as number)) * 10_000 : Infinity;
+
+        if (this.maxSpreadAbs > 0 && spread > this.maxSpreadAbs) {
+          logger.warn({ assetId: signal.assetId, bestBid, bestAsk, spread, maxSpreadAbs: this.maxSpreadAbs }, 'skipping: spread too wide');
+          return;
+        }
+        if (this.maxSpreadBps > 0 && spreadBps > this.maxSpreadBps) {
+          logger.warn(
+            { assetId: signal.assetId, bestBid, bestAsk, spread, spreadBps, maxSpreadBps: this.maxSpreadBps },
+            'skipping: spread too wide (bps)'
+          );
+          return;
+        }
+      } catch (e) {
+        logger.debug({ err: e }, 'orderbook/spread check failed; continuing');
+      }
+    }
+
+    // Price-move safety: compare observed signal price vs current midpoint.
+    if (this.maxPriceMove > 0) {
+      try {
+        const mid: any = await (this.client as any).getMidpoint?.(signal.assetId);
+        const midpoint = Number(mid?.midpoint ?? mid?.price ?? mid);
+        if (Number.isFinite(midpoint) && midpoint > 0) {
+          const move = Math.abs(midpoint - price);
+          if (move > this.maxPriceMove) {
+            logger.warn({ assetId: signal.assetId, price, midpoint, move }, 'skipping: price moved too far');
+            return;
+          }
+        }
+      } catch (e) {
+        logger.debug({ err: e }, 'midpoint check failed; continuing');
+      }
+    }
+
+    // --- Hybrid execution (range vs momentum) ---
+    const execStyle = String(process.env.COPY_EXEC_STYLE ?? 'hybrid').toLowerCase();
+    const momentumTriggerAbs = Number(process.env.COPY_MOMENTUM_TRIGGER_ABS ?? '0.02');
+
+    // If we have book info, we can choose a better limit price than the trader's print.
+    let desiredPrice = price;
+
+    const haveBook = Number.isFinite(bestBid as any) && Number.isFinite(bestAsk as any) && Number.isFinite(midFromBook as any);
+    if (execStyle === 'hybrid' && haveBook) {
+      const bb = bestBid as number;
+      const ba = bestAsk as number;
+      const mid = midFromBook as number;
+
+      const isExitLike = signal.side === 'SELL' || signal.trader === 'risk-manager' || signal.trader === 'trader-exit-reconciler';
+
+      if (isExitLike) {
+        // Exits: prioritize getting out (hit bid for sells; for buys, cross to ask).
+        desiredPrice = signal.side === 'SELL' ? bb : ba;
+      } else {
+        // Entries: default to range/pullback (post near bid). Only chase if trader print is far from mid.
+        const chase = Math.abs(price - mid) >= momentumTriggerAbs;
+        desiredPrice = chase ? (signal.side === 'BUY' ? ba : bb) : (signal.side === 'BUY' ? bb : ba);
+      }
+
+      logger.info(
+        {
+          assetId: signal.assetId,
+          traderPrice: price,
+          desiredPrice,
+          bestBid: bb,
+          bestAsk: ba,
+          mid,
+          momentumTriggerAbs,
+          side: signal.side,
+        },
+        'hybrid execution price selected'
+      );
+    }
+
+    const shares = notional / desiredPrice;
+
+    // Open-notional guard (approximate): only count BUY notional towards open exposure.
+    const mkey = (signal.market ?? signal.assetId).toLowerCase();
+    const open = this.openNotionalByMarket.get(mkey) ?? 0;
+
+    const activeMarkets = [...this.openNotionalByMarket.values()].filter((v) => v > 0).length;
+    if (signal.side === 'BUY' && open <= 0 && activeMarkets >= this.maxActiveMarkets) {
+      logger.warn(
+        { market: signal.market, assetId: signal.assetId, activeMarkets, maxActiveMarkets: this.maxActiveMarkets },
+        'skipping: maxActiveMarkets exceeded (too many markets already open)'
+      );
+      return;
+    }
+
+    if (signal.side === 'BUY' && open + notional > this.maxOpenUsdcPerMarket) {
+      logger.warn(
+        { market: signal.market, assetId: signal.assetId, openUsdc: open, attempted: notional, max: this.maxOpenUsdcPerMarket },
+        'skipping: maxOpenUsdcPerMarket exceeded'
+      );
+      return;
+    }
+
+    logger.info(
+      {
+        trader: signal.trader,
+        market: signal.market,
+        assetId: signal.assetId,
+        side: signal.side,
+        price,
+        notional,
+        shares,
+      },
+      'placing order'
+    );
+
+    // Prefer dynamic tick_size/neg_risk from orderbook; fall back to defaults.
+    const tickSize = Number(tickSizeStr ?? '0.01');
+    const negRisk2 = negRisk ?? false;
+
+    const clampToTick = (p: number) => {
+      const clamped = Math.min(1 - tickSize, Math.max(tickSize, p));
+      // round to nearest tick
+      return Math.round(clamped / tickSize) * tickSize;
+    };
+
+    const safePrice = clampToTick(desiredPrice);
+
+    let order: any;
+    try {
+      // createAndPostOrder expects tokenID, price, size (shares), side.
+      order = await this.client.createAndPostOrder(
+        {
+          tokenID: signal.assetId,
+          // If marketable=true, prefer aggressive pricing by using price as-is for now.
+          // (True market orders aren't supported; marketable mode should be implemented using book crossing.)
+          price: safePrice,
+          size: shares,
+          side: signal.side,
+        } as any,
+        { tickSize: tickSize.toString() as any, negRisk: negRisk2 } as any
+      );
+    } catch (err) {
+      this.consecutiveOrderFailures += 1;
+      logger.error({ err, assetId: signal.assetId, safePrice, shares, consecutiveOrderFailures: this.consecutiveOrderFailures }, 'createAndPostOrder threw');
+      if (this.consecutiveOrderFailures >= this.maxConsecutiveFailures) {
+        this.haltTrading('too many consecutive order failures (throws)', { maxConsecutiveFailures: this.maxConsecutiveFailures });
+      }
+      return;
+    }
+
+    // Update simple counters only on success.
+    if (order?.error) {
+      this.consecutiveOrderFailures += 1;
+      logger.error({ order, consecutiveOrderFailures: this.consecutiveOrderFailures }, 'order rejected');
+
+      const errMsg = String(order?.error ?? '');
+      if (errMsg.toLowerCase().includes('invalid signature')) {
+        this.haltTrading('invalid signature');
+      } else if (this.consecutiveOrderFailures >= this.maxConsecutiveFailures) {
+        this.haltTrading('too many consecutive order failures', { maxConsecutiveFailures: this.maxConsecutiveFailures });
+      }
+
+      return;
+    }
+
+    this.consecutiveOrderFailures = 0;
+
+    this.dailyNotionalUsdc += notional;
+    if (signal.side === 'BUY') {
+      this.openNotionalByMarket.set(mkey, open + notional);
+
+      const nowMs = Date.now();
+      const cur = this.openPositions.get(mkey);
+      if (!cur) {
+        this.openPositions.set(mkey, {
+          marketKey: mkey,
+          assetId: signal.assetId,
+          outcome: signal.outcome,
+          notionalUsdc: open + notional,
+          shares,
+          entryPrice: safePrice,
+          bestPrice: safePrice,
+          openedAtMs: nowMs,
+          buysCount: 1,
+          lastBuyAtMs: nowMs,
+          lastBuyPrice: Number(signal.price ?? safePrice),
+        });
+      } else {
+        const prevNotional = Math.max(0, cur.notionalUsdc);
+        const newNotional = open + notional;
+        const avgEntry = newNotional > 0 ? (cur.entryPrice * prevNotional + safePrice * notional) / newNotional : safePrice;
+        this.openPositions.set(mkey, {
+          ...cur,
+          assetId: signal.assetId,
+          outcome: signal.outcome ?? cur.outcome,
+          notionalUsdc: newNotional,
+          shares: Math.max(0, (cur.shares ?? 0) + shares),
+          entryPrice: avgEntry,
+          bestPrice: Math.max(cur.bestPrice ?? safePrice, safePrice),
+          buysCount: (cur.buysCount ?? 1) + 1,
+          lastBuyAtMs: nowMs,
+          lastBuyPrice: Number(signal.price ?? safePrice),
+        });
+      }
+    } else {
+      // SELL: compute realized PnL using limit price as proxy.
+      const cur = this.openPositions.get(mkey);
+      if (cur && cur.shares > 0) {
+        const sharesSold = Math.min(cur.shares, shares);
+        const realized = (safePrice - cur.entryPrice) * sharesSold;
+        this.dailyRealizedPnlUsdc += realized;
+        logger.warn(
+          {
+            dayKey: this.dayKey,
+            marketKey: mkey,
+            entryPrice: cur.entryPrice,
+            exitPrice: safePrice,
+            sharesSold,
+            realizedPnlUsdcDelta: realized,
+            dailyRealizedPnlUsdc: this.dailyRealizedPnlUsdc,
+            estimated: true,
+          },
+          'daily realized pnl updated (estimated)'
+        );
+      }
+
+      const remaining = Math.max(0, open - notional);
+      this.openNotionalByMarket.set(mkey, remaining);
+      if (remaining <= 0) {
+        this.openPositions.delete(mkey);
+      } else {
+        if (cur) {
+          const remainingShares = Math.max(0, (cur.shares ?? 0) - shares);
+          this.openPositions.set(mkey, { ...cur, notionalUsdc: remaining, shares: remainingShares });
+        }
+      }
+    }
+
+    logger.info({ order, dailyNotionalUsdc: this.dailyNotionalUsdc, dailyRealizedPnlUsdc: this.dailyRealizedPnlUsdc, dayKey: this.dayKey }, 'order posted');
+  }
+}

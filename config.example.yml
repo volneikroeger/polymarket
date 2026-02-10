@@ -1,0 +1,21 @@
+traders:
+  # Wallet addresses to mirror (lowercase recommended)
+  - "0x0000000000000000000000000000000000000000"
+
+copy:
+  fixedUsdcPerTrade: 10
+  # If true, try to place an immediately-marketable order.
+  # If false, copy the same limit price when possible.
+  marketable: false
+
+risk:
+  maxUsdcPerTrade: 25
+  maxOpenUsdcPerMarket: 100
+  maxDailyLossUsdc: 50
+  maxPriceMove: 0.01
+  allowMarkets: []
+  denyMarkets: []
+
+runtime:
+  paper: true
+  pollIntervalMs: 1500

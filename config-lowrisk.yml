@@ -1,0 +1,23 @@
+traders:
+  # Leave empty initially; this process is for low-risk/manual/filtered strategies.
+  # You can add one or more proxy wallets later.
+  - "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817"
+
+copy:
+  fixedUsdcPerTrade: 1
+  marketable: false
+
+risk:
+  # Extra conservative defaults
+  maxUsdcPerTrade: 1
+  maxOpenUsdcPerMarket: 5
+  maxDailyLossUsdc: 10
+  maxActiveMarkets: 3
+  maxPriceMove: 0.005
+  allowMarkets: []
+  denyMarkets: []
+
+runtime:
+  # Start this process in paper mode by default.
+  paper: true
+  pollIntervalMs: 5000

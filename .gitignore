@@ -1,0 +1,9 @@
+node_modules
+dist
+.env
+.env.*
+config.yml
+arb-scanner.yml
+quant-config.yml
+pnl-state.json
+logs/

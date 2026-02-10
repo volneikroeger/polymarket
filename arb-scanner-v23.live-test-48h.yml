@@ -1,0 +1,89 @@
+# LIVE-TEST 48h profile (CONSERVATIVE)
+# Purpose: run LIVE for 48h with low exposure, thick-margin opps, aggressive kill-switches.
+# NOTE: This file is intentionally LIVE-ARMED.
+
+runtime:
+  paper: false
+  dryRun: false
+  liveArmed: true
+  telegramEnabled: true
+
+refresh:
+  universeRefreshMs: 600000
+  monitorPollMs: 1000
+  maxMarketsMonitored: 60
+
+filter:
+  maxDisplayedSum: 1.02
+  maxSpreadAbs: 0.008
+  topN: 15
+
+  minAskNotionalTopNUsdc: 35
+  minBidNotionalTopNUsdc: 35
+
+  minBestAsk: 0.02
+  maxBestAsk: 0.98
+
+  # activity (currently not enforced by fetch in code; kept for schema completeness)
+  minTradesLast5m: 3
+  minVolumeLast1hUsdc: 200
+  minChurnPerMin: 3
+
+arb:
+  legNotionalUsdc: 5.0
+
+  feeBufferAbs: 0.004
+  slippageBufferAbs: 0.003
+  execBufferAbs: 0.002
+
+  safetyMarginUsdc: 0.02
+  minProfitUsdc: 0.12
+  minRoiPct: 0.012
+
+  pollIntervalMsExec: 200
+
+  legFillTimeoutMs: 1200
+  leg2TimeoutMs: 1200
+  ttlMs: 1500
+  revalidateBeforeEachLeg: true
+
+  maxPartialFillPct: 0.25
+  maxUnwindLossUsdc: 0.25
+  maxUnwindLossPct: 0.020
+
+  maxConcurrentOpps: 1
+  splitMaxChildren: 1
+
+risk:
+  statePath: /var/lib/polymarket-arb-scanner/state.json
+
+  # accounting
+  maxDailyNotionalUsdc: 60
+  maxDailyLossUsdc: 2.0
+
+  # exposure
+  maxOpenExposureUsdc: 20
+  maxExposurePerMarketUsdc: 7
+  maxOneLegExposureUsdc: 3
+
+  maxOpenOrders: 10
+
+  # local rate limits
+  maxOrdersPerMinute: 20
+  maxCancelsPerMinute: 40
+
+  # unwind/fails
+  maxConsecutiveFailures: 5
+  maxConsecutiveUnwinds: 2
+  cooldownPerMarketMs: 900000
+
+  # infra kill switches
+  httpErrorsHaltThreshold: 4
+  haltDurationMs: 600000
+
+  feedStaleMs: 8000
+
+  latencyMaxMs: 1500
+  latencyMaxBreachesToHalt: 5
+
+  cooldownAfterHaltMs: 300000
