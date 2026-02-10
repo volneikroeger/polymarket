@@ -8,6 +8,17 @@ type ApiCreds = {
 import { Wallet } from 'ethers';
 import { logger } from '../logger.js';
 import type { CopySignal } from '../signals/types.js';
+import {
+  recordSignalExecution,
+  getOpenPosition,
+  upsertOpenPosition,
+  deleteOpenPosition,
+  getDailyLimit,
+  incrementDailyNotional,
+  updateDailyPnl,
+  type ExecutedSignal,
+  type OpenPosition as DbOpenPosition,
+} from '../database.js';
 
 type CreateParams = {
   enableTrading: boolean;
@@ -219,16 +230,74 @@ export class PolymarketExecutor {
    * Execute a copy signal.
    * NOTE: This is intentionally conservative and incomplete until we finalize the signal source.
    */
-  getOpenPositions(): OpenPosition[] {
-    return [...this.openPositions.values()];
+  async getOpenPositions(): Promise<OpenPosition[]> {
+    const dbPositions = await (await import('../database.js')).getAllOpenPositions();
+
+    const result: OpenPosition[] = dbPositions.map((p) => ({
+      marketKey: p.market_key,
+      assetId: p.asset_id,
+      outcome: p.outcome,
+      notionalUsdc: Number(p.notional_usdc),
+      shares: Number(p.shares),
+      entryPrice: Number(p.entry_price),
+      bestPrice: Number(p.best_price),
+      openedAtMs: new Date(p.opened_at).getTime(),
+      buysCount: p.buys_count,
+      lastBuyAtMs: p.last_buy_at ? new Date(p.last_buy_at).getTime() : new Date(p.opened_at).getTime(),
+      lastBuyPrice: p.last_buy_price ? Number(p.last_buy_price) : Number(p.entry_price),
+    }));
+
+    for (const p of result) {
+      this.openPositions.set(p.marketKey, p);
+      this.openNotionalByMarket.set(p.marketKey, p.notionalUsdc);
+    }
+
+    return result;
   }
 
-  updateBestPrice(marketKey: string, bestPrice: number) {
+  private dbToOpenPosition(dbPos: DbOpenPosition): OpenPosition {
+    return {
+      marketKey: dbPos.market_key,
+      assetId: dbPos.asset_id,
+      outcome: dbPos.outcome,
+      notionalUsdc: Number(dbPos.notional_usdc),
+      shares: Number(dbPos.shares),
+      entryPrice: Number(dbPos.entry_price),
+      bestPrice: Number(dbPos.best_price),
+      openedAtMs: new Date(dbPos.opened_at).getTime(),
+      buysCount: dbPos.buys_count,
+      lastBuyAtMs: dbPos.last_buy_at ? new Date(dbPos.last_buy_at).getTime() : new Date(dbPos.opened_at).getTime(),
+      lastBuyPrice: dbPos.last_buy_price ? Number(dbPos.last_buy_price) : Number(dbPos.entry_price),
+    };
+  }
+
+  async updateBestPrice(marketKey: string, bestPrice: number) {
     const key = marketKey.toLowerCase();
-    const cur = this.openPositions.get(key);
+    let cur = this.openPositions.get(key);
+    if (!cur) {
+      const dbPos = await getOpenPosition(key);
+      if (dbPos) {
+        cur = this.dbToOpenPosition(dbPos);
+      }
+    }
     if (!cur) return;
     if (bestPrice > cur.bestPrice) {
-      this.openPositions.set(key, { ...cur, bestPrice });
+      const updated = { ...cur, bestPrice };
+      this.openPositions.set(key, updated);
+
+      await upsertOpenPosition({
+        market_key: key,
+        asset_id: updated.assetId,
+        outcome: updated.outcome,
+        notional_usdc: updated.notionalUsdc,
+        shares: updated.shares,
+        entry_price: updated.entryPrice,
+        best_price: bestPrice,
+        opened_at: new Date(updated.openedAtMs).toISOString(),
+        buys_count: updated.buysCount,
+        last_buy_at: updated.lastBuyAtMs ? new Date(updated.lastBuyAtMs).toISOString() : undefined,
+        last_buy_price: updated.lastBuyPrice,
+      });
     }
   }
 
@@ -243,8 +312,16 @@ export class PolymarketExecutor {
     }
   }
 
-  hasOpenPosition(marketKey: string): boolean {
-    return (this.openPositions.get(marketKey.toLowerCase())?.notionalUsdc ?? 0) > 0;
+  async hasOpenPosition(marketKey: string): Promise<boolean> {
+    const key = marketKey.toLowerCase();
+    const cached = this.openPositions.get(key);
+    if (cached) return cached.notionalUsdc > 0;
+
+    const dbPos = await getOpenPosition(key);
+    if (dbPos) {
+      return Number(dbPos.notional_usdc) > 0;
+    }
+    return false;
   }
 
   // (removed) legacy resetDailyIfNeeded(nowMs:number) — replaced by timezone dayKey rollover.
@@ -341,12 +418,15 @@ export class PolymarketExecutor {
 
     if (notional <= 0) return;
 
-    // Daily LOSS enforcement: only stop when we're net down beyond maxDailyLossUsdc.
-    if (this.dailyRealizedPnlUsdc <= -Math.abs(this.maxDailyLossUsdc)) {
+    const dailyLimit = await getDailyLimit(this.dayKey);
+    const currentDailyNotional = dailyLimit?.notional_usdc ? Number(dailyLimit.notional_usdc) : 0;
+    const currentDailyPnl = dailyLimit?.realized_pnl_usdc ? Number(dailyLimit.realized_pnl_usdc) : 0;
+
+    if (currentDailyPnl <= -Math.abs(this.maxDailyLossUsdc)) {
       logger.error(
         {
           dayKey: this.dayKey,
-          dailyRealizedPnlUsdc: this.dailyRealizedPnlUsdc,
+          dailyRealizedPnlUsdc: currentDailyPnl,
           maxDailyLossUsdc: this.maxDailyLossUsdc,
         },
         'daily loss limit reached (blocking new orders)'
@@ -354,12 +434,11 @@ export class PolymarketExecutor {
       return;
     }
 
-    // Optional daily NOTIONAL cap (0 disables).
-    if (this.maxDailyNotionalUsdc > 0 && this.dailyNotionalUsdc + notional > this.maxDailyNotionalUsdc) {
+    if (this.maxDailyNotionalUsdc > 0 && currentDailyNotional + notional > this.maxDailyNotionalUsdc) {
       logger.error(
         {
           dayKey: this.dayKey,
-          dailyNotionalUsdc: this.dailyNotionalUsdc,
+          dailyNotionalUsdc: currentDailyNotional,
           attempted: notional,
           maxDailyNotionalUsdc: this.maxDailyNotionalUsdc,
         },
@@ -561,14 +640,39 @@ export class PolymarketExecutor {
 
     this.consecutiveOrderFailures = 0;
 
+    const dedupeKey = `${signal.trader}:${signal.market}:${signal.assetId}:${signal.side}:${Date.now()}`;
+    const executedSignal: ExecutedSignal = {
+      dedupe_key: dedupeKey,
+      trader: signal.trader,
+      market: signal.market,
+      asset_id: signal.assetId,
+      side: signal.side,
+      notional_usdc: notional,
+      shares,
+      price: safePrice,
+      order_id: order?.orderID || order?.id,
+      tx_hash: order?.transactionHash,
+      executed_at: new Date().toISOString(),
+      detected_at: signal.detectedAt ? new Date(signal.detectedAt).toISOString() : new Date().toISOString(),
+    };
+
+    await recordSignalExecution(executedSignal);
+    await incrementDailyNotional(this.dayKey, notional);
+
     this.dailyNotionalUsdc += notional;
     if (signal.side === 'BUY') {
       this.openNotionalByMarket.set(mkey, open + notional);
 
       const nowMs = Date.now();
-      const cur = this.openPositions.get(mkey);
+      let cur = this.openPositions.get(mkey);
       if (!cur) {
-        this.openPositions.set(mkey, {
+        const dbPos = await getOpenPosition(mkey);
+        if (dbPos) {
+          cur = this.dbToOpenPosition(dbPos);
+        }
+      }
+      if (!cur) {
+        const newPosition: OpenPosition = {
           marketKey: mkey,
           assetId: signal.assetId,
           outcome: signal.outcome,
@@ -580,31 +684,70 @@ export class PolymarketExecutor {
           buysCount: 1,
           lastBuyAtMs: nowMs,
           lastBuyPrice: Number(signal.price ?? safePrice),
+        };
+        this.openPositions.set(mkey, newPosition);
+
+        await upsertOpenPosition({
+          market_key: mkey,
+          asset_id: signal.assetId,
+          outcome: signal.outcome,
+          notional_usdc: open + notional,
+          shares,
+          entry_price: safePrice,
+          best_price: safePrice,
+          opened_at: new Date(nowMs).toISOString(),
+          buys_count: 1,
+          last_buy_at: new Date(nowMs).toISOString(),
+          last_buy_price: Number(signal.price ?? safePrice),
         });
       } else {
         const prevNotional = Math.max(0, cur.notionalUsdc);
         const newNotional = open + notional;
         const avgEntry = newNotional > 0 ? (cur.entryPrice * prevNotional + safePrice * notional) / newNotional : safePrice;
-        this.openPositions.set(mkey, {
-          ...cur,
+        const updatedPosition: OpenPosition = {
+          marketKey: mkey,
           assetId: signal.assetId,
           outcome: signal.outcome ?? cur.outcome,
           notionalUsdc: newNotional,
-          shares: Math.max(0, (cur.shares ?? 0) + shares),
+          shares: Math.max(0, cur.shares + shares),
           entryPrice: avgEntry,
-          bestPrice: Math.max(cur.bestPrice ?? safePrice, safePrice),
-          buysCount: (cur.buysCount ?? 1) + 1,
+          bestPrice: Math.max(cur.bestPrice, safePrice),
+          openedAtMs: cur.openedAtMs,
+          buysCount: cur.buysCount + 1,
           lastBuyAtMs: nowMs,
           lastBuyPrice: Number(signal.price ?? safePrice),
+        };
+        this.openPositions.set(mkey, updatedPosition);
+
+        await upsertOpenPosition({
+          market_key: mkey,
+          asset_id: signal.assetId,
+          outcome: signal.outcome ?? cur.outcome,
+          notional_usdc: newNotional,
+          shares: Math.max(0, cur.shares + shares),
+          entry_price: avgEntry,
+          best_price: Math.max(cur.bestPrice, safePrice),
+          opened_at: new Date(cur.openedAtMs).toISOString(),
+          buys_count: cur.buysCount + 1,
+          last_buy_at: new Date(nowMs).toISOString(),
+          last_buy_price: Number(signal.price ?? safePrice),
         });
       }
     } else {
-      // SELL: compute realized PnL using limit price as proxy.
-      const cur = this.openPositions.get(mkey);
+      let cur = this.openPositions.get(mkey);
+      if (!cur) {
+        const dbPos = await getOpenPosition(mkey);
+        if (dbPos) {
+          cur = this.dbToOpenPosition(dbPos);
+        }
+      }
       if (cur && cur.shares > 0) {
         const sharesSold = Math.min(cur.shares, shares);
         const realized = (safePrice - cur.entryPrice) * sharesSold;
         this.dailyRealizedPnlUsdc += realized;
+
+        await updateDailyPnl(this.dayKey, realized);
+
         logger.warn(
           {
             dayKey: this.dayKey,
@@ -624,10 +767,26 @@ export class PolymarketExecutor {
       this.openNotionalByMarket.set(mkey, remaining);
       if (remaining <= 0) {
         this.openPositions.delete(mkey);
+        await deleteOpenPosition(mkey);
       } else {
         if (cur) {
-          const remainingShares = Math.max(0, (cur.shares ?? 0) - shares);
-          this.openPositions.set(mkey, { ...cur, notionalUsdc: remaining, shares: remainingShares });
+          const remainingShares = Math.max(0, cur.shares - shares);
+          const updatedPosition: OpenPosition = { ...cur, notionalUsdc: remaining, shares: remainingShares };
+          this.openPositions.set(mkey, updatedPosition);
+
+          await upsertOpenPosition({
+            market_key: mkey,
+            asset_id: cur.assetId,
+            outcome: cur.outcome,
+            notional_usdc: remaining,
+            shares: remainingShares,
+            entry_price: cur.entryPrice,
+            best_price: cur.bestPrice,
+            opened_at: new Date(cur.openedAtMs).toISOString(),
+            buys_count: cur.buysCount,
+            last_buy_at: cur.lastBuyAtMs ? new Date(cur.lastBuyAtMs).toISOString() : undefined,
+            last_buy_price: cur.lastBuyPrice,
+          });
         }
       }
     }

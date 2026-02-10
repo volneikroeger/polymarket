@@ -49,7 +49,7 @@ export class TraderExitReconciler {
     const ex = this.params.executor;
     const trader = this.params.trader.toLowerCase();
 
-    const open = ex.getOpenPositions();
+    const open = await ex.getOpenPositions();
     if (open.length === 0) return;
 
     // Fetch current trader positions snapshot.

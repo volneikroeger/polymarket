@@ -59,7 +59,6 @@ async function main() {
     stopLossAbs: Number(process.env.COPY_STOP_LOSS_ABS ?? '0.03'),
     trailAbs: Number(process.env.COPY_TRAIL_ABS ?? '0'), // disabled by default; let gains run and exit with trader
     maxHoldMs: Number(process.env.COPY_MAX_HOLD_MS ?? String(12 * 60 * 60 * 1000)),
-    maxConsecutiveOrderFailures: Number(process.env.MAX_CONSECUTIVE_ORDER_FAILURES ?? '3'),
   });
   riskMgr.start();
 

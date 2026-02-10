@@ -1,6 +1,7 @@
 import EventEmitter from 'node:events';
 import { logger } from '../logger.js';
 import type { CopySignal } from './types.js';
+import { checkSignalExecuted, recordSignalExecution, type ExecutedSignal } from '../database.js';
 
 type Params = {
   traders: string[];
@@ -213,18 +214,23 @@ export class TraderPositionMirror {
     this.statsByTrader.set(trader, cur);
   }
 
-  private shouldEmitSignal(dedupeKey: string, nowMs: number): boolean {
-    // Periodic cleanup (cheap).
-    if (this.recentSignals.size > 5000) {
-      for (const [k, exp] of this.recentSignals.entries()) {
-        if (exp <= nowMs) this.recentSignals.delete(k);
-      }
+  private async shouldEmitSignal(dedupeKey: string, nowMs: number): Promise<boolean> {
+    const alreadyExecuted = await checkSignalExecuted(dedupeKey);
+    if (alreadyExecuted) {
+      return false;
     }
 
     const exp = this.recentSignals.get(dedupeKey);
     if (exp && exp > nowMs) return false;
 
     this.recentSignals.set(dedupeKey, nowMs + SIGNAL_DEDUPE_TTL_MS);
+
+    if (this.recentSignals.size > 5000) {
+      for (const [k, exp] of this.recentSignals.entries()) {
+        if (exp <= nowMs) this.recentSignals.delete(k);
+      }
+    }
+
     return true;
   }
 
@@ -309,81 +315,38 @@ export class TraderPositionMirror {
       const ratio = getCopyRatio();
       const scaledNotional = traderUsdc * ratio;
 
-      // Minimum notional needed to satisfy the minimum shares constraint.
       const minNotionalForMinShares = MIN_SHARES_PER_ORDER * price;
 
-      // Hybrid sizing policy (requested):
-      // - If the ratio-based sizing is already big enough to meet minimum shares, use it (clamped).
-      // - If not, place the minimum possible valid order immediately.
       const now = Date.now();
 
-      // Fast path: ratio sufficient -> emit immediately.
-      if (scaledNotional >= minNotionalForMinShares) {
-        if (!this.shouldEmitSignal(dedupeKey, now)) {
-          logger.info({ trader, tokenId, side, ts, tx, dedupeKey }, 'dedupe: skipping duplicate trade signal');
-          this.lastSeen.set(trader, { ts, tx });
-          continue;
-        }
-        let notionalUsdc = Math.min(scaledNotional, MAX_MY_USDC_PER_SIGNAL);
-        notionalUsdc = Math.max(notionalUsdc, MIN_MY_USDC_PER_SIGNAL);
-
-        // Ensure we still meet minimum shares.
-        if (notionalUsdc < minNotionalForMinShares) {
-          // If clamping pushed it below the min, bump to min (if allowed by MAX).
-          if (MAX_MY_USDC_PER_SIGNAL < minNotionalForMinShares) {
-            this.bump(trader, 'skippedMaxTooLow', 1);
-            logger.warn(
-              { tokenId, side, notionalUsdc, minNotionalForMinShares, maxMyUsdcPerSignal: MAX_MY_USDC_PER_SIGNAL },
-              'ratio sizing would be valid, but MAX_MY_USDC_PER_SIGNAL is too low to satisfy min shares; skipping'
-            );
-            this.lastSeen.set(trader, { ts, tx });
-            continue;
-          }
-          notionalUsdc = minNotionalForMinShares;
-        }
-
-        const signal: CopySignal = {
-          trader,
-          market: String(it.conditionId ?? it.slug ?? it.title ?? ''),
-          assetId: tokenId,
-          outcome: it.outcome,
-          side,
-          notionalUsdc,
-          price,
-          detectedAt: now,
-        };
-
-        logger.warn(
-          { tokenId, side, notionalUsdc, scaledNotional, minNotionalForMinShares },
-          'ratio sizing sufficient: emitting copy signal'
-        );
-
-        this.bump(trader, 'emittedSignals', 1);
-        this.emitter.emit('signal', signal);
-        this.lastSeen.set(trader, { ts, tx });
-        continue;
-      }
-
-      // Slow path: ratio insufficient -> place the minimum valid order immediately.
-      // We do not wait/accumulate; we size to the minimum shares constraint (if allowed by MAX).
-      if (!this.shouldEmitSignal(dedupeKey, now)) {
+      if (!(await this.shouldEmitSignal(dedupeKey, now))) {
         logger.info({ trader, tokenId, side, ts, tx, dedupeKey }, 'dedupe: skipping duplicate trade signal');
         this.lastSeen.set(trader, { ts, tx });
         continue;
       }
 
-      if (MAX_MY_USDC_PER_SIGNAL < minNotionalForMinShares) {
-        this.bump(trader, 'skippedMaxTooLow', 1);
-        logger.warn(
-          { tokenId, side, minNotionalForMinShares, maxMyUsdcPerSignal: MAX_MY_USDC_PER_SIGNAL },
-          'ratio insufficient and MAX_MY_USDC_PER_SIGNAL too low to satisfy min shares; skipping'
-        );
-        this.lastSeen.set(trader, { ts, tx });
-        continue;
+      let notionalUsdc = Math.max(MIN_MY_USDC_PER_SIGNAL, scaledNotional);
+
+      if (notionalUsdc < minNotionalForMinShares) {
+        if (MAX_MY_USDC_PER_SIGNAL < minNotionalForMinShares) {
+          this.bump(trader, 'skippedMaxTooLow', 1);
+          logger.warn(
+            {
+              tokenId,
+              side,
+              price,
+              minNotionalForMinShares,
+              maxMyUsdcPerSignal: MAX_MY_USDC_PER_SIGNAL,
+              minSharesPerOrder: MIN_SHARES_PER_ORDER,
+            },
+            'SKIPPING: Token price too high. MIN_SHARES_PER_ORDER * price exceeds MAX_MY_USDC_PER_SIGNAL cap. Adjust MIN_SHARES_PER_ORDER or increase MAX_MY_USDC_PER_SIGNAL.'
+          );
+          this.lastSeen.set(trader, { ts, tx });
+          continue;
+        }
+        notionalUsdc = minNotionalForMinShares;
       }
 
-      let notionalUsdc = minNotionalForMinShares;
-      notionalUsdc = Math.max(notionalUsdc, MIN_MY_USDC_PER_SIGNAL);
       notionalUsdc = Math.min(notionalUsdc, MAX_MY_USDC_PER_SIGNAL);
 
       const signal: CopySignal = {
@@ -398,8 +361,15 @@ export class TraderPositionMirror {
       };
 
       logger.warn(
-        { tokenId, side, notionalUsdc, minNotionalForMinShares, scaledNotional },
-        'ratio insufficient: emitting MIN-size copy signal'
+        {
+          tokenId,
+          side,
+          notionalUsdc,
+          scaledNotional,
+          minNotionalForMinShares,
+          maxCap: MAX_MY_USDC_PER_SIGNAL,
+        },
+        'emitting copy signal (respecting MAX_MY_USDC_PER_SIGNAL cap)'
       );
 
       this.bump(trader, 'emittedSignals', 1);

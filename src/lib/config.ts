@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import YAML from 'yaml';
 import { z } from 'zod';
+import { logger } from './logger.js';
 
 const ConfigSchema = z.object({
   traders: z.array(z.string().min(2)),

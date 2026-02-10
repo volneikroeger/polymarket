@@ -30,7 +30,7 @@ export class CopyRiskManager {
 
   private async tick() {
     const ex = this.params.executor;
-    const positions = ex.getOpenPositions();
+    const positions = await ex.getOpenPositions();
     if (positions.length === 0) return;
 
     for (const p of positions) {
