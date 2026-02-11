@@ -21,7 +21,8 @@
     "compare-traders": "tsx src/compareTraders.ts",
     "high-confidence": "tsx src/highConfidenceBot.ts",
     "discover-traders": "tsx src/traderDiscovery.ts",
-    "rank-traders": "tsx src/traderRanking.ts"
+    "rank-traders": "tsx src/traderRanking.ts",
+    "deep-analysis": "tsx src/traderDeepAnalysis.ts"
   },
   "keywords": [],
   "author": "",
