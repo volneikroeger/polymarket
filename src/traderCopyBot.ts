@@ -66,6 +66,11 @@ async function main() {
 
   logger.info('Trader Copy Bot running - monitoring traders for position changes');
 
+  // Notify pm2 that the process is ready
+  if (process.send) {
+    process.send('ready');
+  }
+
   process.on('SIGINT', () => {
     logger.info('Shutting down gracefully');
     mirror.stop();
