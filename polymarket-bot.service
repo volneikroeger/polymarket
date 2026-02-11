@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket Copy Trading Bot
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/polymarket-copytrader
+ExecStart=/usr/bin/node dist/index.js
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polymarket-bot
+
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
