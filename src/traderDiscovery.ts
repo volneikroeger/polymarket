@@ -18,11 +18,12 @@ async function main() {
 
   logger.info({ config: config.traderDiscovery }, 'Configuration loaded');
 
-  const analyzer = new TraderAnalyzer();
+  const analyzer = new TraderAnalyzer(config);
   const ranking = new TraderRanking(config);
 
-  logger.info('Fetching top traders from leaderboard');
-  const topWallets = await searchTopTradersByVolume(100);
+  const leaderboardLimit = config.traderDiscovery.leaderboardLimit || 1000;
+  logger.info({ limit: leaderboardLimit }, 'Fetching top traders from leaderboard');
+  const topWallets = await searchTopTradersByVolume(leaderboardLimit);
 
   if (topWallets.length === 0) {
     logger.warn('No traders found on leaderboard');

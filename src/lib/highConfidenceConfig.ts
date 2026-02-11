@@ -45,6 +45,8 @@ const HighConfidenceConfigSchema = z.object({
     maxParallelAnalysis: z.number().min(1),
     cacheHours: z.number().min(0),
     topN: z.number().min(1),
+    leaderboardLimit: z.number().min(1).default(1000),
+    tradesPerTrader: z.number().min(1).default(2000),
   }),
   ranking: z.object({
     winRateWeight: z.number().min(0),

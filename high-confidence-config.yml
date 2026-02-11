@@ -102,13 +102,19 @@ traderDiscovery:
   minAvgPositionSize: 5
 
   # Maximum traders to analyze in parallel
-  maxParallelAnalysis: 10
+  maxParallelAnalysis: 20
 
   # Cache duration for trader data in hours
   cacheHours: 24
 
   # Top N traders to return in discovery
-  topN: 10
+  topN: 20
+
+  # Number of traders to fetch from leaderboard
+  leaderboardLimit: 1000
+
+  # Number of trades to fetch per trader
+  tradesPerTrader: 2000
 
 # Trader Ranking Weights (must sum to 100)
 ranking:

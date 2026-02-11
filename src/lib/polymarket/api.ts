@@ -94,9 +94,9 @@ export async function fetchOrderBook(tokenId: string): Promise<OrderBook | null>
   }
 }
 
-export async function fetchTraderData(wallet: string): Promise<TraderData | null> {
+export async function fetchTraderData(wallet: string, limit: number = 2000): Promise<TraderData | null> {
   try {
-    const response = await fetch(`${DATA_API_BASE}/activity?user=${wallet}&limit=500`);
+    const response = await fetch(`${DATA_API_BASE}/activity?user=${wallet}&limit=${limit}`);
 
     if (!response.ok) {
       logger.error({ status: response.status, wallet }, 'Failed to fetch trader data');
@@ -155,20 +155,50 @@ export async function fetchTraderData(wallet: string): Promise<TraderData | null
 
 export async function searchTopTradersByVolume(limit: number = 100): Promise<string[]> {
   try {
-    const response = await fetch(`${DATA_API_BASE}/v1/leaderboard?period=all&limit=${limit}`);
+    const allWallets: string[] = [];
+    const batchSize = 50;
+    const maxBatches = Math.ceil(limit / batchSize);
 
-    if (!response.ok) {
-      logger.error({ status: response.status }, 'Failed to fetch leaderboard');
-      return [];
+    logger.info({ requestedLimit: limit, batches: maxBatches }, 'Fetching traders from leaderboard');
+
+    for (let batch = 0; batch < maxBatches; batch++) {
+      const offset = batch * batchSize;
+      const currentLimit = Math.min(batchSize, limit - allWallets.length);
+
+      const response = await fetch(`${DATA_API_BASE}/v1/leaderboard?period=all&limit=${currentLimit}&offset=${offset}`);
+
+      if (!response.ok) {
+        logger.error({ status: response.status, batch, offset }, 'Failed to fetch leaderboard batch');
+        break;
+      }
+
+      const data = await response.json();
+
+      if (!Array.isArray(data) || data.length === 0) {
+        logger.info({ batch, offset }, 'No more traders available');
+        break;
+      }
+
+      const wallets = data.map((entry: any) => entry.proxyWallet || entry.wallet || entry.address).filter(Boolean);
+      allWallets.push(...wallets);
+
+      logger.info({ batch: batch + 1, fetchedInBatch: wallets.length, totalFetched: allWallets.length }, 'Leaderboard batch fetched');
+
+      if (wallets.length < batchSize) {
+        logger.info('Received fewer traders than requested, end of leaderboard reached');
+        break;
+      }
+
+      if (allWallets.length >= limit) {
+        break;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    const data = await response.json();
+    logger.info({ totalTraders: allWallets.length }, 'Leaderboard fetch complete');
 
-    if (!Array.isArray(data)) {
-      return [];
-    }
-
-    return data.map((entry: any) => entry.proxyWallet || entry.wallet || entry.address).filter(Boolean);
+    return allWallets.slice(0, limit);
   } catch (error) {
     logger.error({ error }, 'Error fetching top traders');
     return [];

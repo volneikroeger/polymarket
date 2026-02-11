@@ -1,5 +1,6 @@
 import { logger } from '../logger.js';
 import { fetchTraderData, type TraderData } from '../polymarket/api.js';
+import type { HighConfidenceConfig } from '../highConfidenceConfig.js';
 
 export interface TraderAnalysis {
   wallet: string;
@@ -26,10 +27,18 @@ export interface CategoryPerformance {
 }
 
 export class TraderAnalyzer {
+  private tradesPerTrader: number;
+  private maxParallelAnalysis: number;
+
+  constructor(config: HighConfidenceConfig) {
+    this.tradesPerTrader = config.traderDiscovery.tradesPerTrader || 2000;
+    this.maxParallelAnalysis = config.traderDiscovery.maxParallelAnalysis || 20;
+  }
+
   async analyzeTrader(wallet: string): Promise<TraderAnalysis | null> {
     logger.info({ wallet }, 'Analyzing trader');
 
-    const traderData = await fetchTraderData(wallet);
+    const traderData = await fetchTraderData(wallet, this.tradesPerTrader);
     if (!traderData) {
       logger.warn({ wallet }, 'Failed to fetch trader data');
       return null;
