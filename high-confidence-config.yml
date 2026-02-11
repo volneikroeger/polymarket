@@ -1,0 +1,120 @@
+# High-Confidence Market Scanner Configuration
+
+# Scanner Settings
+scanner:
+  # Minimum and maximum probability thresholds (0.75 = 75%, 0.95 = 95%)
+  minProbability: 0.75
+  maxProbability: 0.95
+
+  # Minimum 24-hour volume in USDC (e.g., 10000 = $10,000)
+  minVolume24h: 10000
+
+  # Maximum spread percentage (e.g., 5 = 5%)
+  maxSpreadPercent: 5
+
+  # Maximum time to market resolution in hours (e.g., 24 = markets resolving within 24 hours)
+  maxTimeToResolutionHours: 24
+
+  # Allowed market categories (empty array = all categories)
+  categories:
+    - sports
+    - crypto
+    - politics
+
+  # Scan interval in milliseconds (60000 = 1 minute)
+  scanIntervalMs: 60000
+
+  # Minimum market age in hours (avoid very new markets with unstable odds)
+  minMarketAgeHours: 2
+
+# Risk Management Settings
+risk:
+  # Maximum USDC per trade
+  maxUsdcPerTrade: 5
+
+  # Maximum number of active positions
+  maxActivePositions: 5
+
+  # Stop-loss threshold: exit 100% if odds drop by this percentage
+  stopLossPercent: 20
+
+  # Partial stop-loss: exit 50% of position if odds drop by this percentage
+  partialStopPercent: 15
+
+  # Alert threshold: log warning if odds drop by this percentage
+  alertThresholdPercent: 10
+
+  # Take-profit: consider exiting if odds increase by this percentage
+  takeProfitPercent: 10
+
+  # Trailing stop: exit if odds drop this percentage from best price achieved
+  trailingStopPercent: 5
+
+  # Monitor interval in milliseconds (30000 = 30 seconds)
+  monitorIntervalMs: 30000
+
+  # Maximum daily loss in USDC (halts trading if reached)
+  maxDailyLossUsdc: 50
+
+  # Maximum daily notional volume in USDC (0 = disabled)
+  maxDailyNotionalUsdc: 100
+
+# Execution Settings
+execution:
+  # Paper trading mode (true = no real orders, false = live trading)
+  paper: true
+
+  # Use marketable orders (cross the spread) vs limit orders
+  marketable: false
+
+  # Maximum price move tolerance (difference between scan and execution)
+  maxPriceMove: 0.05
+
+# Scoring Weights (must sum to 100)
+scoring:
+  # Weight for probability score (higher = better for high-confidence)
+  probabilityWeight: 30
+
+  # Weight for volume score (higher volume = more liquidity)
+  volumeWeight: 25
+
+  # Weight for spread score (tighter spread = better execution)
+  spreadWeight: 20
+
+  # Weight for time-to-resolution score (sooner = less risk)
+  timeWeight: 15
+
+  # Weight for momentum score (odds moving favorably)
+  momentumWeight: 10
+
+# Trader Discovery Settings
+traderDiscovery:
+  # Minimum win rate to be considered (0.55 = 55%)
+  minWinRate: 0.55
+
+  # Minimum ROI to be considered (0.0 = break-even)
+  minROI: 0.0
+
+  # Minimum number of trades to have statistical significance
+  minTrades: 50
+
+  # Minimum average position size in USDC
+  minAvgPositionSize: 5
+
+  # Maximum traders to analyze in parallel
+  maxParallelAnalysis: 10
+
+  # Cache duration for trader data in hours
+  cacheHours: 24
+
+  # Top N traders to return in discovery
+  topN: 10
+
+# Trader Ranking Weights (must sum to 100)
+ranking:
+  winRateWeight: 30
+  roiWeight: 25
+  totalTradesWeight: 15
+  consistencyWeight: 15
+  positionSizeWeight: 10
+  recencyWeight: 5
