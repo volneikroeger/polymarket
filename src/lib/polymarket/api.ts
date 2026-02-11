@@ -41,6 +41,13 @@ export interface TraderData {
     pnl: number;
     volume: number;
   }>;
+  closedPositions?: {
+    totalPnl: number;
+    totalInvested: number;
+    winningPositions: number;
+    losingPositions: number;
+    totalClosedPositions: number;
+  };
 }
 
 export async function fetchActiveMarkets(): Promise<PolymarketMarket[]> {
@@ -94,45 +101,106 @@ export async function fetchOrderBook(tokenId: string): Promise<OrderBook | null>
   }
 }
 
-export async function fetchTraderData(wallet: string, limit: number = 2000): Promise<TraderData | null> {
+export async function fetchClosedPositions(wallet: string): Promise<{
+  totalPnl: number;
+  totalInvested: number;
+  winningPositions: number;
+  losingPositions: number;
+  totalClosedPositions: number;
+} | null> {
   try {
-    const response = await fetch(`${DATA_API_BASE}/activity?user=${wallet}&limit=${limit}`);
+    const response = await fetch(`${DATA_API_BASE}/positions?user=${wallet.toLowerCase()}`);
 
     if (!response.ok) {
-      logger.error({ status: response.status, wallet }, 'Failed to fetch trader data');
+      logger.error({ status: response.status, wallet }, 'Failed to fetch closed positions');
       return null;
     }
 
-    const trades = await response.json();
+    const positions = await response.json();
 
-    if (!Array.isArray(trades) || trades.length === 0) {
+    if (!Array.isArray(positions) || positions.length === 0) {
       return null;
     }
 
-    const marketPnl = new Map<string, { pnl: number; volume: number; outcome: string }>();
+    let totalPnl = 0;
+    let totalInvested = 0;
+    let winningPositions = 0;
+    let losingPositions = 0;
+
+    for (const pos of positions) {
+      const pnl = Number(pos.cashPnl || 0);
+      const invested = Number(pos.totalBought || 0);
+
+      totalPnl += pnl;
+      totalInvested += invested;
+
+      if (pnl > 0) winningPositions++;
+      else if (pnl < 0) losingPositions++;
+    }
+
+    return {
+      totalPnl,
+      totalInvested,
+      winningPositions,
+      losingPositions,
+      totalClosedPositions: positions.length,
+    };
+  } catch (error) {
+    logger.error({ error, wallet }, 'Error fetching closed positions');
+    return null;
+  }
+}
+
+export async function fetchTraderData(wallet: string, limit: number = 2000): Promise<TraderData | null> {
+  try {
+    const [activityResponse, closedPositions] = await Promise.all([
+      fetch(`${DATA_API_BASE}/activity?user=${wallet}&limit=${limit}`),
+      fetchClosedPositions(wallet),
+    ]);
+
+    if (!activityResponse.ok) {
+      logger.error({ status: activityResponse.status, wallet }, 'Failed to fetch trader activity');
+      return null;
+    }
+
+    const activity = await activityResponse.json();
+
+    if (!Array.isArray(activity) || activity.length === 0) {
+      return null;
+    }
+
+    const marketPnl = new Map<string, { pnl: number; volume: number; outcome: string; shares: number }>();
     let totalVolume = 0;
 
-    for (const trade of trades) {
-      const marketId = trade.market || trade.marketId;
-      const side = String(trade.side || '').toUpperCase();
-      const price = Number(trade.price || 0);
-      const size = Number(trade.size || 0);
+    for (const record of activity) {
+      const type = record.type || 'TRADE';
+
+      if (type !== 'TRADE') continue;
+
+      const marketId = record.market || record.marketId;
+      const side = String(record.side || '').toUpperCase();
+      const price = Number(record.price || 0);
+      const size = Number(record.size || 0);
       const notional = price * size;
 
       totalVolume += notional;
 
-      const key = `${marketId}:${trade.outcome || trade.asset_id}`;
-      const existing = marketPnl.get(key) || { pnl: 0, volume: 0, outcome: trade.outcome || '' };
+      const key = `${marketId}:${record.outcome || record.asset_id}`;
+      const existing = marketPnl.get(key) || { pnl: 0, volume: 0, outcome: record.outcome || '', shares: 0 };
 
       if (side === 'BUY') {
         existing.pnl -= notional;
+        existing.shares += size;
       } else if (side === 'SELL') {
         existing.pnl += notional;
+        existing.shares -= size;
       }
 
       existing.volume += notional;
       marketPnl.set(key, existing);
     }
+
+    const openPositions = Array.from(marketPnl.entries()).filter(([_, data]) => Math.abs(data.shares) > 0.01);
 
     const markets = Array.from(marketPnl.entries()).map(([key, data]) => ({
       marketId: key.split(':')[0],
@@ -144,8 +212,9 @@ export async function fetchTraderData(wallet: string, limit: number = 2000): Pro
     return {
       wallet,
       totalVolume,
-      totalTrades: trades.length,
+      totalTrades: activity.filter((a: any) => a.type === 'TRADE').length,
       markets,
+      closedPositions: closedPositions || undefined,
     };
   } catch (error) {
     logger.error({ error, wallet }, 'Error fetching trader data');

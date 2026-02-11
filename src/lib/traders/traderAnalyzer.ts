@@ -44,19 +44,22 @@ export class TraderAnalyzer {
       return null;
     }
 
-    if (traderData.totalTrades === 0) {
-      logger.warn({ wallet }, 'Trader has no trades');
+    if (!traderData.closedPositions || traderData.closedPositions.totalClosedPositions === 0) {
+      logger.warn({ wallet }, 'Trader has no closed positions to analyze');
       return null;
     }
 
-    const totalPnl = traderData.markets.reduce((sum, m) => sum + m.pnl, 0);
-    const profitableMarkets = traderData.markets.filter(m => m.pnl > 0).length;
-    const losingMarkets = traderData.markets.filter(m => m.pnl < 0).length;
-    const totalMarkets = traderData.markets.length;
+    const { closedPositions } = traderData;
 
-    const winRate = totalMarkets > 0 ? profitableMarkets / totalMarkets : 0;
-    const roi = traderData.totalVolume > 0 ? (totalPnl / traderData.totalVolume) * 100 : 0;
-    const avgPositionSize = traderData.totalTrades > 0 ? traderData.totalVolume / traderData.totalTrades : 0;
+    const totalPnl = closedPositions.totalPnl;
+    const profitableTrades = closedPositions.winningPositions;
+    const losingTrades = closedPositions.losingPositions;
+    const totalVolume = closedPositions.totalInvested;
+    const totalPositions = closedPositions.totalClosedPositions;
+
+    const winRate = totalPositions > 0 ? profitableTrades / totalPositions : 0;
+    const roi = totalVolume > 0 ? (totalPnl / totalVolume) * 100 : 0;
+    const avgPositionSize = totalPositions > 0 ? totalVolume / totalPositions : 0;
 
     const categories: Record<string, CategoryPerformance> = {};
 
@@ -64,11 +67,11 @@ export class TraderAnalyzer {
       wallet,
       winRate,
       roi,
-      totalTrades: traderData.totalTrades,
-      totalVolume: traderData.totalVolume,
+      totalTrades: totalPositions,
+      totalVolume,
       avgPositionSize,
-      profitableTrades: profitableMarkets,
-      losingTrades: losingMarkets,
+      profitableTrades,
+      losingTrades,
       totalPnl,
       categories,
       recentPerformance: {
@@ -81,9 +84,9 @@ export class TraderAnalyzer {
       wallet,
       winRate: (winRate * 100).toFixed(2) + '%',
       roi: roi.toFixed(2) + '%',
-      totalTrades: traderData.totalTrades,
+      totalPositions,
       totalPnl: totalPnl.toFixed(2),
-    }, 'Trader analysis complete');
+    }, 'Trader analysis complete (closed positions only)');
 
     return analysis;
   }
