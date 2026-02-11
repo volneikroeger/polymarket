@@ -1,23 +1,25 @@
 traders:
-  # Leave empty initially; this process is for low-risk/manual/filtered strategies.
-  # You can add one or more proxy wallets later.
-  - "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817"
+  # Trader #1 - Elite Performance (Win Rate: 96.6%, ROI: +54%)
+  - "0x2e4c9c7275d0f5d02e1787e7f59d98ad985b28dd"
+
+  # Trader #10 - Perfect Record (Win Rate: 100%, ROI: +28.1%)
+  - "0x1f0789e20e82d8dba1ad50bc31d8570d1593def9"
 
 copy:
-  fixedUsdcPerTrade: 1
+  fixedUsdcPerTrade: 3
   marketable: false
 
 risk:
-  # Extra conservative defaults
-  maxUsdcPerTrade: 1
-  maxOpenUsdcPerMarket: 5
-  maxDailyLossUsdc: 10
-  maxActiveMarkets: 3
-  maxPriceMove: 0.005
+  # Conservative settings for ~$100 bankroll
+  maxUsdcPerTrade: 5
+  maxOpenUsdcPerMarket: 10
+  maxDailyLossUsdc: 15
+  maxActiveMarkets: 4
+  maxPriceMove: 0.01
   allowMarkets: []
   denyMarkets: []
 
 runtime:
-  # Start this process in paper mode by default.
+  # Start in paper mode - set to false when ready for live trading
   paper: true
   pollIntervalMs: 5000
