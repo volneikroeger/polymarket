@@ -18,7 +18,10 @@
     "arb-scanner": "tsx src/arbScanner.ts",
     "arb-scanner-v2": "tsx src/arbScannerV2.ts",
     "arb-scanner-v23": "tsx src/arbScannerV23.ts",
-    "compare-traders": "tsx src/compareTraders.ts"
+    "compare-traders": "tsx src/compareTraders.ts",
+    "high-confidence": "tsx src/highConfidenceBot.ts",
+    "discover-traders": "tsx src/traderDiscovery.ts",
+    "rank-traders": "tsx src/traderRanking.ts"
   },
   "keywords": [],
   "author": "",
