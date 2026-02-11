@@ -56,6 +56,7 @@ const HighConfidenceConfigSchema = z.object({
     positionSizeWeight: z.number().min(0),
     recencyWeight: z.number().min(0),
   }),
+  traders: z.array(z.string()).optional().default([]),
 });
 
 export type HighConfidenceConfig = z.infer<typeof HighConfidenceConfigSchema>;

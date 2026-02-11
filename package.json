@@ -22,7 +22,8 @@
     "high-confidence": "tsx src/highConfidenceBot.ts",
     "discover-traders": "tsx src/traderDiscovery.ts",
     "rank-traders": "tsx src/traderRanking.ts",
-    "deep-analysis": "tsx src/traderDeepAnalysis.ts"
+    "deep-analysis": "tsx src/traderDeepAnalysis.ts",
+    "copy-traders": "tsx src/traderCopyBot.ts"
   },
   "keywords": [],
   "author": "",
