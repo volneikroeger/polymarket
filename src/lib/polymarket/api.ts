@@ -1,6 +1,7 @@
 import { logger } from '../logger.js';
 
 const POLYMARKET_API_BASE = 'https://gamma-api.polymarket.com';
+const DATA_API_BASE = 'https://data-api.polymarket.com';
 const CLOB_API_BASE = 'https://clob.polymarket.com';
 
 export interface PolymarketMarket {
@@ -95,7 +96,7 @@ export async function fetchOrderBook(tokenId: string): Promise<OrderBook | null>
 
 export async function fetchTraderData(wallet: string): Promise<TraderData | null> {
   try {
-    const response = await fetch(`${POLYMARKET_API_BASE}/trades?wallet=${wallet}&limit=1000`);
+    const response = await fetch(`${DATA_API_BASE}/activity?user=${wallet}&limit=500`);
 
     if (!response.ok) {
       logger.error({ status: response.status, wallet }, 'Failed to fetch trader data');
@@ -154,7 +155,7 @@ export async function fetchTraderData(wallet: string): Promise<TraderData | null
 
 export async function searchTopTradersByVolume(limit: number = 100): Promise<string[]> {
   try {
-    const response = await fetch(`${POLYMARKET_API_BASE}/leaderboard?period=all&limit=${limit}`);
+    const response = await fetch(`${DATA_API_BASE}/v1/leaderboard?period=all&limit=${limit}`);
 
     if (!response.ok) {
       logger.error({ status: response.status }, 'Failed to fetch leaderboard');
@@ -167,7 +168,7 @@ export async function searchTopTradersByVolume(limit: number = 100): Promise<str
       return [];
     }
 
-    return data.map((entry: any) => entry.wallet || entry.address).filter(Boolean);
+    return data.map((entry: any) => entry.proxyWallet || entry.wallet || entry.address).filter(Boolean);
   } catch (error) {
     logger.error({ error }, 'Error fetching top traders');
     return [];
