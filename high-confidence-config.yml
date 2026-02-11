@@ -62,7 +62,7 @@ risk:
 # Execution Settings
 execution:
   # Paper trading mode (true = no real orders, false = live trading)
-  paper: true
+  paper: false
 
   # Use marketable orders (cross the spread) vs limit orders
   marketable: false
@@ -128,13 +128,13 @@ ranking:
 # Traders to Follow (copy their positions)
 traders:
   # Top trader: 91.5% WR, 20.13% ROI
-  - 0xa3e9a711841e655def080044768452b60f4263d0
+  - "0xa3e9a711841e655def080044768452b60f4263d0"
 
   # Top trader: 77% WR, 2.35% ROI, $2M volume
-  - 0x095dcfb123a4bc035ee6b0d624bab0cc964352cf
+  - "0x095dcfb123a4bc035ee6b0d624bab0cc964352cf"
 
   # Top trader: 76% WR, 0.17% ROI
-  - 0x6d3c5bd13984b2de47c3a88ddc455309aab3d294
+  - "0x6d3c5bd13984b2de47c3a88ddc455309aab3d294"
 
   # Top trader: 92% WR, 0.01% ROI, $19M volume
-  - 0x0c0e270cf879583d6a0142fc817e05b768d0434e
+  - "0x0c0e270cf879583d6a0142fc817e05b768d0434e"
