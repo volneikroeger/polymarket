@@ -186,11 +186,20 @@ export class PolymarketExecutor {
     }
 
     const useServerTime = process.env.USE_SERVER_TIME === 'true';
+    logger.info({ host, chainId, useServerTime, hasCreds: !!creds }, 'Creating ClobClient...');
     const client = new ClobClient(host, chainId, signer, creds, signatureType as any, funder, undefined, useServerTime);
+    logger.info('ClobClient created successfully');
 
     if (!creds) {
       logger.info('Deriving Polymarket API key (L2 creds) via L1...');
-      const derived: any = await client.createOrDeriveApiKey();
+
+      // Add timeout to prevent hanging
+      const derivePromise = client.createOrDeriveApiKey();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout deriving API key after 30s')), 30000)
+      );
+
+      const derived: any = await Promise.race([derivePromise, timeoutPromise]);
       // clob-client's error handler returns objects that may not throw; sometimes the
       // error payload becomes { key: undefined, secret: undefined, passphrase: undefined }.
       const missing = !derived?.key || !derived?.secret || !derived?.passphrase;
