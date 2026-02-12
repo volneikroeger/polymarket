@@ -13,7 +13,6 @@ type MirrorStats = {
   emittedSignals: number;
   skippedInvalidPrice: number;
   skippedInvalidUsdc: number;
-  adjustedToMinShares: number;
   adjustedToMaxCap: number;
   accumulatorTtlResets: number;
 };
@@ -37,10 +36,6 @@ type DataApiActivityItem = {
 
 const DATA_API_BASE = process.env.DATA_API_BASE ?? 'https://data-api.polymarket.com';
 const ACTIVITY_LIMIT = Number(process.env.ACTIVITY_LIMIT ?? '50');
-// Minimum notional (USDC) we will actually send for a copied trade.
-// Useful when COPY_RATIO makes trades too tiny to be accepted.
-const MIN_MY_USDC_PER_SIGNAL = Number(process.env.MIN_MY_USDC_PER_SIGNAL ?? '0.5');
-const MIN_SHARES_PER_ORDER = Number(process.env.MIN_SHARES_PER_ORDER ?? '5');
 const ACCUM_TTL_MS = Number(process.env.ACCUM_TTL_MS ?? String(30 * 60 * 1000));
 
 // Prevent duplicate orders when Data API emits multiple TRADE items for the same fill/tx.
@@ -173,10 +168,8 @@ export class TraderPositionMirror {
         pollIntervalMs: this.pollIntervalMs,
         dataApiBase: DATA_API_BASE,
         activityLimit: ACTIVITY_LIMIT,
-        minMyUsdcPerSignal: MIN_MY_USDC_PER_SIGNAL,
         copyRatio: getCopyRatio(),
         maxMyUsdcPerSignal: MAX_MY_USDC_PER_SIGNAL,
-        minSharesPerOrder: MIN_SHARES_PER_ORDER,
       },
       'starting TraderPositionMirror (data-api activity)'
     );
@@ -208,7 +201,6 @@ export class TraderPositionMirror {
       emittedSignals: 0,
       skippedInvalidPrice: 0,
       skippedInvalidUsdc: 0,
-      adjustedToMinShares: 0,
       adjustedToMaxCap: 0,
       accumulatorTtlResets: 0,
     };
@@ -317,8 +309,6 @@ export class TraderPositionMirror {
       const ratio = getCopyRatio();
       const scaledNotional = traderUsdc * ratio;
 
-      const minNotionalForMinShares = MIN_SHARES_PER_ORDER * price;
-
       const now = Date.now();
 
       if (!(await this.shouldEmitSignal(dedupeKey, now))) {
@@ -327,24 +317,13 @@ export class TraderPositionMirror {
         continue;
       }
 
-      // Always copy the trade, adjusting size to respect limits
-      // Start with scaled notional, then apply min/max bounds
+      // Apply only the maximum cap limit (executor will handle minimum sizing)
       let notionalUsdc = scaledNotional;
 
-      // Apply minimum limit
-      if (notionalUsdc < MIN_MY_USDC_PER_SIGNAL) {
-        notionalUsdc = MIN_MY_USDC_PER_SIGNAL;
-        this.bump(trader, 'adjustedToMinShares', 1);
-      }
-
-      // Apply maximum limit
       if (notionalUsdc > MAX_MY_USDC_PER_SIGNAL) {
         notionalUsdc = MAX_MY_USDC_PER_SIGNAL;
         this.bump(trader, 'adjustedToMaxCap', 1);
       }
-
-      // Calculate resulting shares
-      const resultingShares = notionalUsdc / price;
 
       const signal: CopySignal = {
         trader,
@@ -357,29 +336,21 @@ export class TraderPositionMirror {
         detectedAt: now,
       };
 
-      // Log with details about adjustments
+      // Log signal emission with sizing details
       const logData: any = {
         tokenId,
         side,
         traderUsdc,
         scaledNotional,
         finalNotionalUsdc: notionalUsdc,
-        resultingShares: resultingShares.toFixed(2),
         price,
       };
 
       let logMessage = 'emitting copy signal';
 
       if (notionalUsdc === MAX_MY_USDC_PER_SIGNAL && scaledNotional > MAX_MY_USDC_PER_SIGNAL) {
-        logMessage += ' (reduced to MAX_MY_USDC_PER_SIGNAL cap)';
+        logMessage += ' (capped at MAX_MY_USDC_PER_SIGNAL)';
         logData.originalScaled = scaledNotional;
-      } else if (notionalUsdc === MIN_MY_USDC_PER_SIGNAL && scaledNotional < MIN_MY_USDC_PER_SIGNAL) {
-        logMessage += ' (increased to MIN_MY_USDC_PER_SIGNAL)';
-        logData.originalScaled = scaledNotional;
-      }
-
-      if (resultingShares < MIN_SHARES_PER_ORDER) {
-        logMessage += ` [WARNING: ${resultingShares.toFixed(2)} shares < MIN_SHARES_PER_ORDER=${MIN_SHARES_PER_ORDER}]`;
       }
 
       logger.warn(logData, logMessage);

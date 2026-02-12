@@ -247,6 +247,41 @@ export async function updateDailyPnl(dayKey: string, pnlDelta: number): Promise<
   }
 }
 
+export interface SizingDecision {
+  id?: string;
+  created_at?: string;
+  asset_id: string;
+  market?: string;
+  trader?: string;
+  side: string;
+  desired_price: number;
+  raw_notional: number;
+  ideal_notional: number;
+  adjusted_notional?: number;
+  shares: number;
+  min_shares_per_order: number;
+  decision: 'ideal' | 'adjusted_to_min_shares' | 'skipped_exceeds_cap' | 'skipped_daily_limit';
+  reason?: string;
+  max_usdc_per_trade: number;
+  min_usdc_per_trade: number;
+  executed_signal_id?: string;
+}
+
+export async function recordSizingDecision(decision: SizingDecision): Promise<boolean> {
+  const supabase = getSupabaseClient();
+
+  const { error } = await supabase
+    .from('sizing_decisions')
+    .insert(decision);
+
+  if (error) {
+    logger.error({ error, decision }, 'Error recording sizing decision');
+    return false;
+  }
+
+  return true;
+}
+
 export async function cleanupOldSignals(daysToKeep: number = 7): Promise<number> {
   const supabase = getSupabaseClient();
   const cutoffDate = new Date();

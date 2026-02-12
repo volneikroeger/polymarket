@@ -16,8 +16,10 @@ import {
   getDailyLimit,
   incrementDailyNotional,
   updateDailyPnl,
+  recordSizingDecision,
   type ExecutedSignal,
   type OpenPosition as DbOpenPosition,
+  type SizingDecision,
 } from '../database.js';
 import { fetchMarketMetadata, calculateHoursUntilResolution } from './api.js';
 
@@ -469,8 +471,15 @@ export class PolymarketExecutor {
 
     this.resetDailyIfNeeded();
 
+    // Step 1: Get the base notional from signal or fallback to fixed amount
     const rawNotional = signal.notionalUsdc ?? this.fixedUsdcPerTrade;
-    const notional = Math.min(rawNotional, this.maxUsdcPerTrade);
+
+    // Step 2: Try to use minimum ideal entry size (default $1.00)
+    const minUsdcPerTrade = Number(process.env.MIN_USDC_PER_TRADE ?? '1.0');
+    const idealNotional = Math.max(rawNotional, minUsdcPerTrade);
+
+    // Step 3: Apply maximum cap (ceiling of $5 by default)
+    const notional = Math.min(idealNotional, this.maxUsdcPerTrade);
 
     if (notional <= 0) return;
 
@@ -714,31 +723,51 @@ export class PolymarketExecutor {
       );
     }
 
+    // Intelligent sizing: try ideal entry size, adjust for exchange minimums, respect ceiling
+    const minSharesPerOrder = Number(process.env.MIN_SHARES_PER_ORDER ?? '5');
     let shares = notional / desiredPrice;
     let adjustedNotional = notional;
+    let sizingReason: 'ideal' | 'adjusted_to_min_shares' | 'skipped_exceeds_cap' | 'skipped_daily_limit' = 'ideal';
 
-    // Minimum shares validation (exchange requirement, typically 5 shares)
-    const minSharesPerOrder = Number(process.env.MIN_SHARES_PER_ORDER ?? '5');
+    // Check if we meet exchange minimum shares requirement
     if (shares < minSharesPerOrder) {
       // Calculate minimum notional needed to reach minimum shares
-      const minNotional = minSharesPerOrder * desiredPrice;
+      const minNotionalNeeded = minSharesPerOrder * desiredPrice;
 
-      // Check if we can adjust notional to meet minimum without violating limits
-      const canAdjust = minNotional <= this.maxUsdcPerTrade;
-
-      if (!canAdjust) {
+      // Check if adjusting would exceed our maximum ceiling
+      if (minNotionalNeeded > this.maxUsdcPerTrade) {
         logger.warn(
           {
             assetId: signal.assetId,
             desiredPrice,
-            calculatedShares: shares,
+            calculatedShares: shares.toFixed(2),
             minSharesPerOrder,
-            originalNotional: notional,
-            minNotionalNeeded: minNotional,
+            idealNotional: notional,
+            minNotionalNeeded: minNotionalNeeded.toFixed(2),
             maxUsdcPerTrade: this.maxUsdcPerTrade,
+            reason: 'price_too_low',
           },
-          'SKIPPING: Order too small (shares < minimum). Increase MAX_MY_USDC_PER_SIGNAL or maxUsdcPerTrade.'
+          `SKIPPING: Cannot meet MIN_SHARES=${minSharesPerOrder} without exceeding MAX cap of $${this.maxUsdcPerTrade}`
         );
+
+        // Record sizing decision
+        await recordSizingDecision({
+          asset_id: signal.assetId,
+          market: signal.market,
+          trader: signal.trader,
+          side: signal.side,
+          desired_price: desiredPrice,
+          raw_notional: rawNotional,
+          ideal_notional: notional,
+          adjusted_notional: minNotionalNeeded,
+          shares,
+          min_shares_per_order: minSharesPerOrder,
+          decision: 'skipped_exceeds_cap',
+          reason: `MIN_SHARES requirement (${minNotionalNeeded.toFixed(2)}) exceeds MAX cap (${this.maxUsdcPerTrade})`,
+          max_usdc_per_trade: this.maxUsdcPerTrade,
+          min_usdc_per_trade: minUsdcPerTrade,
+        });
+
         return;
       }
 
@@ -746,38 +775,105 @@ export class PolymarketExecutor {
       const dailyLimit = await getDailyLimit(this.dayKey);
       const currentDailyNotional = dailyLimit?.notional_usdc ? Number(dailyLimit.notional_usdc) : 0;
 
-      if (this.maxDailyNotionalUsdc > 0 && currentDailyNotional + minNotional > this.maxDailyNotionalUsdc) {
+      if (this.maxDailyNotionalUsdc > 0 && currentDailyNotional + minNotionalNeeded > this.maxDailyNotionalUsdc) {
         logger.warn(
           {
             assetId: signal.assetId,
             desiredPrice,
-            calculatedShares: shares,
+            calculatedShares: shares.toFixed(2),
             minSharesPerOrder,
-            originalNotional: notional,
-            minNotionalNeeded: minNotional,
+            idealNotional: notional,
+            minNotionalNeeded: minNotionalNeeded.toFixed(2),
             currentDailyNotional,
             maxDailyNotionalUsdc: this.maxDailyNotionalUsdc,
           },
-          'SKIPPING: Adjusting to minimum shares would exceed daily notional limit'
+          'SKIPPING: Adjusting to MIN_SHARES would exceed daily notional limit'
         );
+
+        // Record sizing decision
+        await recordSizingDecision({
+          asset_id: signal.assetId,
+          market: signal.market,
+          trader: signal.trader,
+          side: signal.side,
+          desired_price: desiredPrice,
+          raw_notional: rawNotional,
+          ideal_notional: notional,
+          adjusted_notional: minNotionalNeeded,
+          shares,
+          min_shares_per_order: minSharesPerOrder,
+          decision: 'skipped_daily_limit',
+          reason: `Would exceed daily limit: ${currentDailyNotional} + ${minNotionalNeeded.toFixed(2)} > ${this.maxDailyNotionalUsdc}`,
+          max_usdc_per_trade: this.maxUsdcPerTrade,
+          min_usdc_per_trade: minUsdcPerTrade,
+        });
+
         return;
       }
 
-      // Adjust notional to meet minimum shares requirement
-      adjustedNotional = minNotional;
+      // Adjust to minimum shares requirement
+      adjustedNotional = minNotionalNeeded;
       shares = minSharesPerOrder;
+      sizingReason = 'adjusted_to_min_shares';
 
       logger.info(
         {
           assetId: signal.assetId,
-          originalNotional: notional,
-          adjustedNotional,
-          originalShares: notional / desiredPrice,
-          adjustedShares: shares,
+          idealNotional: notional.toFixed(2),
+          adjustedNotional: adjustedNotional.toFixed(2),
+          shares: shares.toFixed(2),
+          desiredPrice,
           minSharesPerOrder,
+          reason: 'exchange_minimum_requirement',
         },
-        'Adjusted notional to meet minimum shares requirement'
+        `Sizing: Adjusted from $${notional.toFixed(2)} to $${adjustedNotional.toFixed(2)} to meet MIN_SHARES=${minSharesPerOrder}`
       );
+
+      // Record sizing decision (adjusted)
+      await recordSizingDecision({
+        asset_id: signal.assetId,
+        market: signal.market,
+        trader: signal.trader,
+        side: signal.side,
+        desired_price: desiredPrice,
+        raw_notional: rawNotional,
+        ideal_notional: notional,
+        adjusted_notional: adjustedNotional,
+        shares,
+        min_shares_per_order: minSharesPerOrder,
+        decision: 'adjusted_to_min_shares',
+        reason: `Adjusted to meet MIN_SHARES=${minSharesPerOrder} requirement`,
+        max_usdc_per_trade: this.maxUsdcPerTrade,
+        min_usdc_per_trade: minUsdcPerTrade,
+      });
+    } else {
+      // We can use the ideal notional
+      logger.info(
+        {
+          assetId: signal.assetId,
+          notional: notional.toFixed(2),
+          shares: shares.toFixed(2),
+          desiredPrice,
+        },
+        `Sizing: Using ideal notional of $${notional.toFixed(2)} (${shares.toFixed(2)} shares)`
+      );
+
+      // Record sizing decision (ideal)
+      await recordSizingDecision({
+        asset_id: signal.assetId,
+        market: signal.market,
+        trader: signal.trader,
+        side: signal.side,
+        desired_price: desiredPrice,
+        raw_notional: rawNotional,
+        ideal_notional: notional,
+        shares,
+        min_shares_per_order: minSharesPerOrder,
+        decision: 'ideal',
+        reason: `Using ideal notional, meets MIN_SHARES requirement`,
+        max_usdc_per_trade: this.maxUsdcPerTrade,
+        min_usdc_per_trade: minUsdcPerTrade,
+      });
     }
 
     // Open-notional guard (approximate): only count BUY notional towards open exposure.
