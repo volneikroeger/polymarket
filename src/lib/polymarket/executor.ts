@@ -19,6 +19,7 @@ import {
   type ExecutedSignal,
   type OpenPosition as DbOpenPosition,
 } from '../database.js';
+import { fetchMarketMetadata, calculateHoursUntilResolution } from './api.js';
 
 type CreateParams = {
   enableTrading: boolean;
@@ -555,6 +556,89 @@ export class PolymarketExecutor {
       }
     }
 
+    // --- Low ROI protection: short-term only + fee validation ---
+    const LOW_ROI_THRESHOLD_PERCENT = Number(process.env.LOW_ROI_THRESHOLD_PERCENT ?? '10');
+    const MAX_HOURS_TO_RESOLUTION_LOW_ROI = Number(process.env.MAX_HOURS_TO_RESOLUTION_LOW_ROI ?? '48');
+    const ALLOW_LOW_ROI_WITH_FEES = process.env.ALLOW_LOW_ROI_WITH_FEES === 'true';
+
+    let isLowRoi = false;
+    let roiPercent: number | null = null;
+
+    if (signal.side === 'BUY' && price > 0 && price < 1) {
+      roiPercent = ((1.0 - price) / price) * 100;
+      isLowRoi = roiPercent < LOW_ROI_THRESHOLD_PERCENT;
+    }
+
+    if (isLowRoi && signal.market) {
+      logger.info(
+        {
+          assetId: signal.assetId,
+          conditionId: signal.market,
+          price,
+          roiPercent: roiPercent?.toFixed(2),
+          threshold: LOW_ROI_THRESHOLD_PERCENT,
+        },
+        'LOW ROI order detected, applying additional validations'
+      );
+
+      const metadata = await fetchMarketMetadata(signal.market);
+      const hoursUntilResolution = metadata?.endDate ? calculateHoursUntilResolution(metadata.endDate) : null;
+
+      if (!metadata || hoursUntilResolution === null) {
+        logger.warn(
+          {
+            assetId: signal.assetId,
+            conditionId: signal.market,
+            reason: 'missing_market_metadata',
+          },
+          'SKIPPING low ROI order: unable to fetch market metadata'
+        );
+        return;
+      }
+
+      if (hoursUntilResolution > MAX_HOURS_TO_RESOLUTION_LOW_ROI) {
+        logger.warn(
+          {
+            assetId: signal.assetId,
+            conditionId: signal.market,
+            hoursUntilResolution: hoursUntilResolution.toFixed(1),
+            maxHours: MAX_HOURS_TO_RESOLUTION_LOW_ROI,
+            reason: 'resolution_too_far',
+          },
+          'SKIPPING low ROI order: market resolves too far in the future'
+        );
+        return;
+      }
+
+      const isFeeFree = negRisk === true || metadata.negRisk === true;
+
+      if (!isFeeFree && !ALLOW_LOW_ROI_WITH_FEES) {
+        logger.warn(
+          {
+            assetId: signal.assetId,
+            conditionId: signal.market,
+            negRisk,
+            metadataNegRisk: metadata.negRisk,
+            reason: 'fees_would_erode_profit',
+          },
+          'SKIPPING low ROI order: market has taker fees and maker-only execution not guaranteed'
+        );
+        return;
+      }
+
+      logger.info(
+        {
+          assetId: signal.assetId,
+          conditionId: signal.market,
+          roiPercent: roiPercent?.toFixed(2),
+          hoursUntilResolution: hoursUntilResolution.toFixed(1),
+          isFeeFree,
+          negRisk,
+        },
+        'LOW ROI order passed validations, proceeding with execution'
+      );
+    }
+
     // Price-move safety: compare observed signal price vs current midpoint.
     if (this.maxPriceMove > 0) {
       try {
@@ -578,9 +662,32 @@ export class PolymarketExecutor {
 
     // If we have book info, we can choose a better limit price than the trader's print.
     let desiredPrice = price;
+    let useMakerOnly = false;
 
     const haveBook = Number.isFinite(bestBid as any) && Number.isFinite(bestAsk as any) && Number.isFinite(midFromBook as any);
-    if (execStyle === 'hybrid' && haveBook) {
+
+    // Low ROI orders with fees: force maker-only execution to avoid taker fees
+    if (isLowRoi && !ALLOW_LOW_ROI_WITH_FEES && haveBook) {
+      const bb = bestBid as number;
+      const ba = bestAsk as number;
+
+      // Post at maker prices (join the book, don't cross)
+      desiredPrice = signal.side === 'BUY' ? bb : ba;
+      useMakerOnly = true;
+
+      logger.info(
+        {
+          assetId: signal.assetId,
+          side: signal.side,
+          traderPrice: price,
+          makerPrice: desiredPrice,
+          bestBid: bb,
+          bestAsk: ba,
+          roiPercent: roiPercent?.toFixed(2),
+        },
+        'LOW ROI: using maker-only execution to avoid taker fees'
+      );
+    } else if (execStyle === 'hybrid' && haveBook) {
       const bb = bestBid as number;
       const ba = bestAsk as number;
       const mid = midFromBook as number;
@@ -727,6 +834,7 @@ export class PolymarketExecutor {
     let order: any;
     try {
       // createAndPostOrder expects tokenID, price, size (shares), side.
+      // For low ROI orders with fees, use postOnly to ensure maker execution
       order = await this.client.createAndPostOrder(
         {
           tokenID: signal.assetId,
@@ -736,7 +844,10 @@ export class PolymarketExecutor {
           size: shares,
           side: signal.side,
         } as any,
-        { tickSize: tickSize.toString() as any, negRisk: negRisk2 } as any
+        { tickSize: tickSize.toString() as any, negRisk: negRisk2 } as any,
+        'GTC' as any,
+        false,
+        useMakerOnly
       );
     } catch (err) {
       this.consecutiveOrderFailures += 1;

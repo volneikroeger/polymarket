@@ -303,3 +303,69 @@ export function calculateMidPrice(orderBook: OrderBook): number | null {
 
   return (bestBid + bestAsk) / 2;
 }
+
+export interface MarketMetadata {
+  conditionId: string;
+  question: string;
+  endDate: string | null;
+  closed: boolean;
+  active: boolean;
+  negRisk?: boolean;
+}
+
+const marketMetadataCache = new Map<string, { data: MarketMetadata; expiresAt: number }>();
+const CACHE_TTL_MS = Number(process.env.CACHE_MARKET_METADATA_MINUTES ?? '30') * 60 * 1000;
+
+export async function fetchMarketMetadata(conditionId: string): Promise<MarketMetadata | null> {
+  const cached = marketMetadataCache.get(conditionId);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.data;
+  }
+
+  try {
+    const response = await fetch(`${POLYMARKET_API_BASE}/markets/${conditionId}`);
+
+    if (!response.ok) {
+      logger.error({ status: response.status, conditionId }, 'Failed to fetch market metadata');
+      return null;
+    }
+
+    const data: any = await response.json();
+
+    const metadata: MarketMetadata = {
+      conditionId: data.id || conditionId,
+      question: data.question || '',
+      endDate: data.endDate || data.end_date || null,
+      closed: data.closed || false,
+      active: data.active || false,
+      negRisk: data.negRisk || data.neg_risk || false,
+    };
+
+    marketMetadataCache.set(conditionId, {
+      data: metadata,
+      expiresAt: Date.now() + CACHE_TTL_MS,
+    });
+
+    return metadata;
+  } catch (error) {
+    logger.error({ error, conditionId }, 'Error fetching market metadata');
+    return null;
+  }
+}
+
+export function calculateHoursUntilResolution(endDate: string | null): number | null {
+  if (!endDate) return null;
+
+  try {
+    const endTime = new Date(endDate).getTime();
+    const now = Date.now();
+
+    if (!Number.isFinite(endTime) || endTime <= 0) return null;
+
+    const hoursRemaining = (endTime - now) / (1000 * 60 * 60);
+    return hoursRemaining;
+  } catch (error) {
+    logger.error({ error, endDate }, 'Error calculating hours until resolution');
+    return null;
+  }
+}
