@@ -58,7 +58,7 @@ risk:
   maxDailyLossUsdc: 50
 
   # Maximum daily notional volume in USDC (0 = disabled)
-  maxDailyNotionalUsdc: 100
+  maxDailyNotionalUsdc: 1000
 
 # Execution Settings
 execution:
