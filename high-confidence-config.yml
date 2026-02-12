@@ -30,7 +30,8 @@ scanner:
 # Risk Management Settings
 risk:
   # Maximum USDC per trade
-  maxUsdcPerTrade: 1
+  # Increased from 1 to 5 to allow position size adjustments
+  maxUsdcPerTrade: 5
 
   # Maximum number of active positions
   maxActivePositions: 10
