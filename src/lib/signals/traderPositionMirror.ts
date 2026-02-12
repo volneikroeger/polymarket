@@ -13,7 +13,8 @@ type MirrorStats = {
   emittedSignals: number;
   skippedInvalidPrice: number;
   skippedInvalidUsdc: number;
-  skippedMaxTooLow: number;
+  adjustedToMinShares: number;
+  adjustedToMaxCap: number;
   accumulatorTtlResets: number;
 };
 
@@ -207,7 +208,8 @@ export class TraderPositionMirror {
       emittedSignals: 0,
       skippedInvalidPrice: 0,
       skippedInvalidUsdc: 0,
-      skippedMaxTooLow: 0,
+      adjustedToMinShares: 0,
+      adjustedToMaxCap: 0,
       accumulatorTtlResets: 0,
     };
     cur[key] += by;
@@ -325,29 +327,24 @@ export class TraderPositionMirror {
         continue;
       }
 
-      let notionalUsdc = Math.max(MIN_MY_USDC_PER_SIGNAL, scaledNotional);
+      // Always copy the trade, adjusting size to respect limits
+      // Start with scaled notional, then apply min/max bounds
+      let notionalUsdc = scaledNotional;
 
-      if (notionalUsdc < minNotionalForMinShares) {
-        if (MAX_MY_USDC_PER_SIGNAL < minNotionalForMinShares) {
-          this.bump(trader, 'skippedMaxTooLow', 1);
-          logger.warn(
-            {
-              tokenId,
-              side,
-              price,
-              minNotionalForMinShares,
-              maxMyUsdcPerSignal: MAX_MY_USDC_PER_SIGNAL,
-              minSharesPerOrder: MIN_SHARES_PER_ORDER,
-            },
-            'SKIPPING: Token price too high. MIN_SHARES_PER_ORDER * price exceeds MAX_MY_USDC_PER_SIGNAL cap. Adjust MIN_SHARES_PER_ORDER or increase MAX_MY_USDC_PER_SIGNAL.'
-          );
-          this.lastSeen.set(trader, { ts, tx });
-          continue;
-        }
-        notionalUsdc = minNotionalForMinShares;
+      // Apply minimum limit
+      if (notionalUsdc < MIN_MY_USDC_PER_SIGNAL) {
+        notionalUsdc = MIN_MY_USDC_PER_SIGNAL;
+        this.bump(trader, 'adjustedToMinShares', 1);
       }
 
-      notionalUsdc = Math.min(notionalUsdc, MAX_MY_USDC_PER_SIGNAL);
+      // Apply maximum limit
+      if (notionalUsdc > MAX_MY_USDC_PER_SIGNAL) {
+        notionalUsdc = MAX_MY_USDC_PER_SIGNAL;
+        this.bump(trader, 'adjustedToMaxCap', 1);
+      }
+
+      // Calculate resulting shares
+      const resultingShares = notionalUsdc / price;
 
       const signal: CopySignal = {
         trader,
@@ -360,17 +357,32 @@ export class TraderPositionMirror {
         detectedAt: now,
       };
 
-      logger.warn(
-        {
-          tokenId,
-          side,
-          notionalUsdc,
-          scaledNotional,
-          minNotionalForMinShares,
-          maxCap: MAX_MY_USDC_PER_SIGNAL,
-        },
-        'emitting copy signal (respecting MAX_MY_USDC_PER_SIGNAL cap)'
-      );
+      // Log with details about adjustments
+      const logData: any = {
+        tokenId,
+        side,
+        traderUsdc,
+        scaledNotional,
+        finalNotionalUsdc: notionalUsdc,
+        resultingShares: resultingShares.toFixed(2),
+        price,
+      };
+
+      let logMessage = 'emitting copy signal';
+
+      if (notionalUsdc === MAX_MY_USDC_PER_SIGNAL && scaledNotional > MAX_MY_USDC_PER_SIGNAL) {
+        logMessage += ' (reduced to MAX_MY_USDC_PER_SIGNAL cap)';
+        logData.originalScaled = scaledNotional;
+      } else if (notionalUsdc === MIN_MY_USDC_PER_SIGNAL && scaledNotional < MIN_MY_USDC_PER_SIGNAL) {
+        logMessage += ' (increased to MIN_MY_USDC_PER_SIGNAL)';
+        logData.originalScaled = scaledNotional;
+      }
+
+      if (resultingShares < MIN_SHARES_PER_ORDER) {
+        logMessage += ` [WARNING: ${resultingShares.toFixed(2)} shares < MIN_SHARES_PER_ORDER=${MIN_SHARES_PER_ORDER}]`;
+      }
+
+      logger.warn(logData, logMessage);
 
       this.bump(trader, 'emittedSignals', 1);
       this.emitter.emit('signal', signal);
