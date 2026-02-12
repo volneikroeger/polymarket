@@ -5,8 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/polymarket-copytrader
+WorkingDirectory=/root/polymarket-copytrader
 ExecStart=/usr/bin/node dist/index.js
 Restart=always
 RestartSec=10

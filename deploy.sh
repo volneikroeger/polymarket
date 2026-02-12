@@ -4,12 +4,6 @@ set -e
 echo "=== Polymarket Bot Deployment Script ==="
 echo ""
 
-# Check if running as root for systemd operations
-if [ "$EUID" -eq 0 ]; then
-    echo "Please do not run as root. This script will use sudo when needed."
-    exit 1
-fi
-
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
@@ -55,28 +49,28 @@ echo "[5/7] Installing systemd service..."
 sed "s|WorkingDirectory=.*|WorkingDirectory=$SCRIPT_DIR|g" polymarket-bot.service > /tmp/polymarket-bot.service
 
 # Copy service file
-sudo cp /tmp/polymarket-bot.service /etc/systemd/system/polymarket-bot.service
-sudo chmod 644 /etc/systemd/system/polymarket-bot.service
+cp /tmp/polymarket-bot.service /etc/systemd/system/polymarket-bot.service
+chmod 644 /etc/systemd/system/polymarket-bot.service
 echo "  ✓ Service file installed"
 
 # Step 6: Enable and restart service
 echo "[6/7] Enabling and starting service..."
-sudo systemctl daemon-reload
-sudo systemctl enable polymarket-bot
-sudo systemctl restart polymarket-bot
+systemctl daemon-reload
+systemctl enable polymarket-bot
+systemctl restart polymarket-bot
 echo "  ✓ Service restarted"
 
 # Step 7: Check status
 echo "[7/7] Checking service status..."
 sleep 2
-sudo systemctl status polymarket-bot --no-pager -l
+systemctl status polymarket-bot --no-pager -l
 
 echo ""
 echo "=== Deployment Complete ==="
 echo ""
 echo "Useful commands:"
-echo "  View logs:        sudo journalctl -u polymarket-bot -f"
-echo "  Check status:     sudo systemctl status polymarket-bot"
-echo "  Restart service:  sudo systemctl restart polymarket-bot"
-echo "  Stop service:     sudo systemctl stop polymarket-bot"
+echo "  View logs:        journalctl -u polymarket-bot -f"
+echo "  Check status:     systemctl status polymarket-bot"
+echo "  Restart service:  systemctl restart polymarket-bot"
+echo "  Stop service:     systemctl stop polymarket-bot"
 echo ""

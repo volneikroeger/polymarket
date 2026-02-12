@@ -7,7 +7,7 @@ Este guia explica como fazer deploy do Polymarket Copy Trading Bot na sua VPS us
 1. VPS com Ubuntu/Debian
 2. Node.js instalado (v18 ou superior)
 3. Git instalado
-4. Acesso SSH à VPS
+4. Acesso SSH à VPS (root ou sudo)
 5. Conta Supabase com banco de dados criado
 6. Credenciais do Polymarket configuradas
 
@@ -38,8 +38,8 @@ No dashboard do Supabase (https://app.supabase.com):
 ### Método 1: Script Automatizado (Recomendado)
 
 ```bash
-# SSH na VPS
-ssh usuario@sua-vps
+# SSH na VPS como root
+ssh root@sua-vps
 
 # Navegue até o diretório do projeto
 cd polymarket-copytrader
@@ -63,8 +63,8 @@ O script irá:
 ### Método 2: Deploy Manual
 
 ```bash
-# 1. SSH na VPS
-ssh usuario@sua-vps
+# 1. SSH na VPS como root
+ssh root@sua-vps
 
 # 2. Navegue até o diretório
 cd polymarket-copytrader
@@ -95,16 +95,16 @@ nano polymarket-bot.service
 # Ajuste WorkingDirectory para o caminho correto do projeto
 
 # 9. Instale o service
-sudo cp polymarket-bot.service /etc/systemd/system/
-sudo chmod 644 /etc/systemd/system/polymarket-bot.service
+cp polymarket-bot.service /etc/systemd/system/
+chmod 644 /etc/systemd/system/polymarket-bot.service
 
 # 10. Ative e inicie o serviço
-sudo systemctl daemon-reload
-sudo systemctl enable polymarket-bot
-sudo systemctl start polymarket-bot
+systemctl daemon-reload
+systemctl enable polymarket-bot
+systemctl start polymarket-bot
 
 # 11. Verifique o status
-sudo systemctl status polymarket-bot
+systemctl status polymarket-bot
 ```
 
 ## Gerenciamento do Serviço
@@ -113,41 +113,41 @@ sudo systemctl status polymarket-bot
 
 ```bash
 # Ver status
-sudo systemctl status polymarket-bot
+systemctl status polymarket-bot
 
 # Iniciar serviço
-sudo systemctl start polymarket-bot
+systemctl start polymarket-bot
 
 # Parar serviço
-sudo systemctl stop polymarket-bot
+systemctl stop polymarket-bot
 
 # Reiniciar serviço
-sudo systemctl restart polymarket-bot
+systemctl restart polymarket-bot
 
 # Desabilitar início automático
-sudo systemctl disable polymarket-bot
+systemctl disable polymarket-bot
 
 # Habilitar início automático
-sudo systemctl enable polymarket-bot
+systemctl enable polymarket-bot
 ```
 
 ### Visualizar Logs
 
 ```bash
 # Logs em tempo real
-sudo journalctl -u polymarket-bot -f
+journalctl -u polymarket-bot -f
 
 # Últimas 100 linhas
-sudo journalctl -u polymarket-bot -n 100
+journalctl -u polymarket-bot -n 100
 
 # Logs das últimas 24 horas
-sudo journalctl -u polymarket-bot --since "24 hours ago"
+journalctl -u polymarket-bot --since "24 hours ago"
 
 # Logs com filtro
-sudo journalctl -u polymarket-bot | grep "ERROR"
+journalctl -u polymarket-bot | grep "ERROR"
 
 # Exportar logs para arquivo
-sudo journalctl -u polymarket-bot > logs.txt
+journalctl -u polymarket-bot > logs.txt
 ```
 
 ## Monitoramento
@@ -210,7 +210,7 @@ Quando o bot detectar um sinal e executar um trade:
 
 ```bash
 # Verificar erros no log
-sudo journalctl -u polymarket-bot -n 50
+journalctl -u polymarket-bot -n 50
 
 # Verificar permissões do .env
 ls -la .env
@@ -240,7 +240,7 @@ curl https://seu-projeto.supabase.co/rest/v1/
 ps aux | grep "node dist/index.js"
 
 # Reiniciar serviço
-sudo systemctl restart polymarket-bot
+systemctl restart polymarket-bot
 ```
 
 ### Bot não está tradando
@@ -263,7 +263,7 @@ Para atualizar o bot:
 git pull origin main
 npm install
 npm run build
-sudo systemctl restart polymarket-bot
+systemctl restart polymarket-bot
 ```
 
 ## Backup e Recovery
@@ -293,7 +293,7 @@ npm install
 npm run build
 
 # Reiniciar serviço
-sudo systemctl restart polymarket-bot
+systemctl restart polymarket-bot
 ```
 
 ## Estrutura de Dados Persistidos
@@ -316,7 +316,7 @@ Base de traders descobertos e analisados (19 traders pré-carregados).
 ## Segurança
 
 1. **Permissões do .env**: Sempre use `chmod 600 .env`
-2. **Service User**: O service roda como usuário `ubuntu` (não root)
+2. **Service User**: O service roda como root (ou usuário especificado)
 3. **RLS Habilitado**: Todas as tabelas do Supabase têm RLS ativo
 4. **Logs Limitados**: Logs são rotacionados automaticamente pelo journald
 5. **Credenciais**: Nunca commite o .env no git
