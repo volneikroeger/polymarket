@@ -611,60 +611,6 @@ export class PolymarketExecutor {
       );
     }
 
-    // Minimum profit margin filter: reject BUY orders with insufficient ROI potential.
-    // Only applies to entry orders (BUY), not exits (SELL).
-    if (String(signal.side).toUpperCase() === 'BUY') {
-      const minProfitMarginPercent = Number(process.env.MIN_PROFIT_MARGIN_PERCENT ?? '0');
-      if (minProfitMarginPercent > 0) {
-        // In Polymarket, each share pays $1.00 if it wins.
-        // Profit per share = $1.00 - entry_price
-        // ROI = ((profit per share) / entry_price) * 100
-        const profitPerShare = 1.0 - desiredPrice;
-        const roiPercent = (profitPerShare / desiredPrice) * 100;
-
-        if (roiPercent < minProfitMarginPercent) {
-          const potentialShares = notional / desiredPrice;
-          const maxPayout = potentialShares * 1.0;
-          const potentialProfit = maxPayout - notional;
-
-          logger.warn(
-            {
-              assetId: signal.assetId,
-              market: signal.market,
-              price: desiredPrice,
-              notional,
-              potentialShares: potentialShares.toFixed(2),
-              investment: notional.toFixed(2),
-              maxPayout: maxPayout.toFixed(2),
-              potentialProfit: potentialProfit.toFixed(2),
-              roiPercent: roiPercent.toFixed(2),
-              minRequired: minProfitMarginPercent,
-            },
-            'SKIPPING: Profit margin too low (insufficient ROI). Betting $' +
-              notional.toFixed(2) +
-              ' to win only $' +
-              potentialProfit.toFixed(2) +
-              ' (' +
-              roiPercent.toFixed(1) +
-              '% ROI < ' +
-              minProfitMarginPercent +
-              '% minimum)'
-          );
-          return;
-        }
-
-        logger.debug(
-          {
-            assetId: signal.assetId,
-            price: desiredPrice,
-            roiPercent: roiPercent.toFixed(2),
-            minRequired: minProfitMarginPercent,
-          },
-          'Profit margin acceptable'
-        );
-      }
-    }
-
     let shares = notional / desiredPrice;
     let adjustedNotional = notional;
 
