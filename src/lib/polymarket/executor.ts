@@ -166,16 +166,38 @@ export class PolymarketExecutor {
       throw new Error('Missing PRIVATE_KEY in env');
     }
 
+    // Validate PRIVATE_KEY format
+    if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+      throw new Error(
+        `Invalid PRIVATE_KEY format: must start with "0x" and be 66 characters (64 hex digits + "0x" prefix). Got length: ${privateKey.length}`
+      );
+    }
+
     const signatureType = Number(process.env.SIGNATURE_TYPE ?? '0');
     const funder = process.env.FUNDER && process.env.FUNDER.trim() ? process.env.FUNDER.trim() : undefined;
+
+    // Validate FUNDER format if using POLY_PROXY or GNOSIS_SAFE
+    if ((signatureType === 1 || signatureType === 2) && !funder) {
+      throw new Error(
+        `SIGNATURE_TYPE=${signatureType} requires FUNDER address. Please set FUNDER in your .env file.`
+      );
+    }
+
+    if (funder && (!funder.startsWith('0x') || funder.length !== 42)) {
+      throw new Error(
+        `Invalid FUNDER format: must start with "0x" and be 42 characters (40 hex digits + "0x" prefix). Got: ${funder}`
+      );
+    }
 
     const signer = new Wallet(privateKey);
 
     logger.info(
       {
         signer: signer.address,
-        signatureType,
+        signatureType: signatureType === 0 ? 'EOA' : signatureType === 1 ? 'POLY_PROXY' : signatureType === 2 ? 'GNOSIS_SAFE' : signatureType,
         funder,
+        host,
+        chainId,
       },
       'polymarket executor signer config'
     );
@@ -200,22 +222,133 @@ export class PolymarketExecutor {
     if (!creds) {
       logger.info('Deriving Polymarket API key (L2 creds) via L1...');
 
-      // Add timeout to prevent hanging
-      const derivePromise = client.createOrDeriveApiKey();
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Timeout deriving API key after 30s')), 30000)
-      );
-
-      const derived: any = await Promise.race([derivePromise, timeoutPromise]);
-      // clob-client's error handler returns objects that may not throw; sometimes the
-      // error payload becomes { key: undefined, secret: undefined, passphrase: undefined }.
-      const missing = !derived?.key || !derived?.secret || !derived?.passphrase;
-      if (!derived || derived.error || missing) {
-        throw new Error(
-          `Failed to derive Polymarket API creds: ${derived?.error ?? 'missing key/secret/passphrase (see CLOB Client request error above)'}`
+      if (signatureType === 1) {
+        logger.info(
+          {
+            signerAddress: signer.address,
+            funderAddress: funder,
+            signatureType: 'POLY_PROXY',
+          },
+          'Using POLY_PROXY authentication. Ensure your wallet is registered as a proxy for the FUNDER address in Polymarket.'
         );
       }
+
+      // Retry logic with exponential backoff
+      const maxRetries = Number(process.env.API_KEY_DERIVE_MAX_RETRIES ?? '3');
+      const retryDelayMs = Number(process.env.API_KEY_DERIVE_RETRY_DELAY_MS ?? '2000');
+      let lastError: any;
+      let derived: any;
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          logger.info({ attempt, maxRetries }, `Attempting to derive API key (attempt ${attempt}/${maxRetries})...`);
+
+          // Add timeout to prevent hanging
+          const derivePromise = client.createOrDeriveApiKey();
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Timeout deriving API key after 30s')), 30000)
+          );
+
+          derived = await Promise.race([derivePromise, timeoutPromise]);
+
+          // clob-client's error handler returns objects that may not throw; sometimes the
+          // error payload becomes { key: undefined, secret: undefined, passphrase: undefined }.
+          const missing = !derived?.key || !derived?.secret || !derived?.passphrase;
+
+          if (derived && !derived.error && !missing) {
+            logger.info({ attempt }, 'Successfully derived Polymarket API creds');
+            break;
+          }
+
+          lastError = derived?.error ?? 'missing key/secret/passphrase';
+          logger.warn(
+            { attempt, maxRetries, error: lastError },
+            `API key derivation failed (attempt ${attempt}/${maxRetries})`
+          );
+
+          if (attempt < maxRetries) {
+            const delay = retryDelayMs * Math.pow(2, attempt - 1);
+            logger.info({ delayMs: delay }, `Waiting before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        } catch (err) {
+          lastError = err;
+          logger.warn(
+            { attempt, maxRetries, error: String(err) },
+            `API key derivation threw error (attempt ${attempt}/${maxRetries})`
+          );
+
+          if (attempt < maxRetries) {
+            const delay = retryDelayMs * Math.pow(2, attempt - 1);
+            logger.info({ delayMs: delay }, `Waiting before retry...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
+        }
+      }
+
+      // Check if we succeeded
+      const missing = !derived?.key || !derived?.secret || !derived?.passphrase;
+      if (!derived || derived.error || missing) {
+        const errorMsg = derived?.error ?? lastError ?? 'missing key/secret/passphrase';
+
+        // Try fallback to EOA mode if POLY_PROXY failed and fallback is enabled
+        const allowFallback = process.env.ALLOW_AUTH_FALLBACK === 'true';
+        if (signatureType === 1 && allowFallback) {
+          logger.warn(
+            { originalSignatureType: signatureType, errorMsg },
+            'POLY_PROXY authentication failed. Attempting fallback to EOA mode (SIGNATURE_TYPE=0)...'
+          );
+
+          try {
+            const fallbackClient = new ClobClient(host, chainId, signer, undefined, 0 as any, undefined, undefined, useServerTime);
+            const fallbackDerived: any = await fallbackClient.createOrDeriveApiKey();
+            const fallbackMissing = !fallbackDerived?.key || !fallbackDerived?.secret || !fallbackDerived?.passphrase;
+
+            if (fallbackDerived && !fallbackDerived.error && !fallbackMissing) {
+              logger.warn(
+                { fallbackSignatureType: 'EOA' },
+                'SUCCESS: Fallback to EOA mode worked! Consider updating your .env to use SIGNATURE_TYPE=0 permanently.'
+              );
+              derived = fallbackDerived;
+              const client2 = new ClobClient(host, chainId, signer, derived, 0 as any, undefined, undefined, useServerTime);
+
+              if (process.env.VERIFY_L2 === 'true') {
+                const resp: any = await client2.getApiKeys();
+                if (resp?.error) {
+                  throw new Error(`Polymarket L2 credential check failed (fallback EOA mode): ${resp.error} (status ${resp.status ?? 'n/a'})`);
+                }
+                logger.info('Verified Polymarket L2 API creds (fallback EOA mode; getApiKeys succeeded).');
+              }
+
+              return new PolymarketExecutor(client2, params.enableTrading, params.fixedUsdcPerTrade, params.maxPriceMove, params);
+            }
+          } catch (fallbackErr) {
+            logger.error({ fallbackErr: String(fallbackErr) }, 'Fallback to EOA mode also failed');
+          }
+        }
+
+        let troubleshootingMsg = `\n\nTroubleshooting steps:\n`;
+        troubleshootingMsg += `1. If using SIGNATURE_TYPE=1 (POLY_PROXY), ensure your wallet (${signer.address}) is registered as a proxy for FUNDER (${funder}) in Polymarket\n`;
+        troubleshootingMsg += `2. Try using SIGNATURE_TYPE=0 (EOA) instead by setting SIGNATURE_TYPE=0 and removing FUNDER from .env\n`;
+        troubleshootingMsg += `3. Visit Polymarket's web interface and export your API credentials, then set POLY_API_KEY, POLY_API_SECRET, and POLY_API_PASSPHRASE in .env\n`;
+        troubleshootingMsg += `4. Check if your wallet has been used on Polymarket before (may need to make at least one trade via web interface)\n`;
+        troubleshootingMsg += `5. Verify your PRIVATE_KEY corresponds to a wallet you control and have used on Polymarket\n`;
+        troubleshootingMsg += `6. Enable automatic fallback to EOA mode by setting ALLOW_AUTH_FALLBACK=true in .env\n`;
+
+        throw new Error(
+          `Failed to derive Polymarket API creds after ${maxRetries} attempts: ${errorMsg}${troubleshootingMsg}`
+        );
+      }
+
       logger.info('Derived Polymarket API creds (stored only in memory). Consider exporting to env for stability.');
+      logger.info(
+        {
+          note: 'To avoid re-deriving on every restart, you can export these creds to .env:',
+          instructions: 'Set POLY_API_KEY, POLY_API_SECRET, and POLY_API_PASSPHRASE in your .env file',
+        },
+        'API credential caching recommendation'
+      );
+
       // Re-init with creds for L2 methods.
       const client2 = new ClobClient(host, chainId, signer, derived, signatureType as any, funder, undefined, useServerTime);
 
