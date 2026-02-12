@@ -262,8 +262,9 @@ export class PolymarketExecutor {
     }));
 
     for (const p of result) {
-      this.openPositions.set(p.marketKey, p);
-      this.openNotionalByMarket.set(p.marketKey, p.notionalUsdc);
+      const assetKey = p.assetId.toLowerCase();
+      this.openPositions.set(assetKey, p);
+      this.openNotionalByMarket.set(assetKey, p.notionalUsdc);
     }
 
     return result;
@@ -285,11 +286,11 @@ export class PolymarketExecutor {
     };
   }
 
-  async updateBestPrice(marketKey: string, bestPrice: number) {
-    const key = marketKey.toLowerCase();
-    let cur = this.openPositions.get(key);
+  async updateBestPrice(assetId: string, bestPrice: number) {
+    const assetKey = assetId.toLowerCase();
+    let cur = this.openPositions.get(assetKey);
     if (!cur) {
-      const dbPos = await getOpenPosition(key);
+      const dbPos = await getOpenPosition(assetKey);
       if (dbPos) {
         cur = this.dbToOpenPosition(dbPos);
       }
@@ -297,10 +298,10 @@ export class PolymarketExecutor {
     if (!cur) return;
     if (bestPrice > cur.bestPrice) {
       const updated = { ...cur, bestPrice };
-      this.openPositions.set(key, updated);
+      this.openPositions.set(assetKey, updated);
 
       await upsertOpenPosition({
-        market_key: key,
+        market_key: cur.marketKey,
         asset_id: updated.assetId,
         outcome: updated.outcome,
         notional_usdc: updated.notionalUsdc,
@@ -326,12 +327,12 @@ export class PolymarketExecutor {
     }
   }
 
-  async hasOpenPosition(marketKey: string): Promise<boolean> {
-    const key = marketKey.toLowerCase();
-    const cached = this.openPositions.get(key);
+  async hasOpenPosition(assetId: string): Promise<boolean> {
+    const assetKey = assetId.toLowerCase();
+    const cached = this.openPositions.get(assetKey);
     if (cached) return cached.notionalUsdc > 0;
 
-    const dbPos = await getOpenPosition(key);
+    const dbPos = await getOpenPosition(assetKey);
     if (dbPos) {
       return Number(dbPos.notional_usdc) > 0;
     }
@@ -781,8 +782,9 @@ export class PolymarketExecutor {
 
     // Open-notional guard (approximate): only count BUY notional towards open exposure.
     // Track positions by assetId to allow multiple positions in different assets of the same market.
-    const mkey = String(signal.assetId).toLowerCase();
-    const open = this.openNotionalByMarket.get(mkey) ?? 0;
+    const assetKey = String(signal.assetId).toLowerCase();
+    const marketKey = String(signal.market ?? signal.assetId).toLowerCase();
+    const open = this.openNotionalByMarket.get(assetKey) ?? 0;
 
     const activeMarkets = [...this.openNotionalByMarket.values()].filter((v) => v > 0).length;
     if (signal.side === 'BUY' && open <= 0 && activeMarkets >= this.maxActiveMarkets) {
@@ -917,19 +919,19 @@ export class PolymarketExecutor {
 
     this.dailyNotionalUsdc += adjustedNotional;
     if (signal.side === 'BUY') {
-      this.openNotionalByMarket.set(mkey, open + adjustedNotional);
+      this.openNotionalByMarket.set(assetKey, open + adjustedNotional);
 
       const nowMs = Date.now();
-      let cur = this.openPositions.get(mkey);
+      let cur = this.openPositions.get(assetKey);
       if (!cur) {
-        const dbPos = await getOpenPosition(mkey);
+        const dbPos = await getOpenPosition(assetKey);
         if (dbPos) {
           cur = this.dbToOpenPosition(dbPos);
         }
       }
       if (!cur) {
         const newPosition: OpenPosition = {
-          marketKey: mkey,
+          marketKey: marketKey,
           assetId: signal.assetId,
           outcome: signal.outcome,
           notionalUsdc: open + adjustedNotional,
@@ -941,10 +943,10 @@ export class PolymarketExecutor {
           lastBuyAtMs: nowMs,
           lastBuyPrice: Number(signal.price ?? safePrice),
         };
-        this.openPositions.set(mkey, newPosition);
+        this.openPositions.set(assetKey, newPosition);
 
         await upsertOpenPosition({
-          market_key: mkey,
+          market_key: marketKey,
           asset_id: signal.assetId,
           outcome: signal.outcome,
           notional_usdc: open + adjustedNotional,
@@ -961,7 +963,7 @@ export class PolymarketExecutor {
         const newNotional = open + adjustedNotional;
         const avgEntry = newNotional > 0 ? (cur.entryPrice * prevNotional + safePrice * adjustedNotional) / newNotional : safePrice;
         const updatedPosition: OpenPosition = {
-          marketKey: mkey,
+          marketKey: marketKey,
           assetId: signal.assetId,
           outcome: signal.outcome ?? cur.outcome,
           notionalUsdc: newNotional,
@@ -973,10 +975,10 @@ export class PolymarketExecutor {
           lastBuyAtMs: nowMs,
           lastBuyPrice: Number(signal.price ?? safePrice),
         };
-        this.openPositions.set(mkey, updatedPosition);
+        this.openPositions.set(assetKey, updatedPosition);
 
         await upsertOpenPosition({
-          market_key: mkey,
+          market_key: marketKey,
           asset_id: signal.assetId,
           outcome: signal.outcome ?? cur.outcome,
           notional_usdc: newNotional,
@@ -990,9 +992,9 @@ export class PolymarketExecutor {
         });
       }
     } else {
-      let cur = this.openPositions.get(mkey);
+      let cur = this.openPositions.get(assetKey);
       if (!cur) {
-        const dbPos = await getOpenPosition(mkey);
+        const dbPos = await getOpenPosition(assetKey);
         if (dbPos) {
           cur = this.dbToOpenPosition(dbPos);
         }
@@ -1007,7 +1009,8 @@ export class PolymarketExecutor {
         logger.warn(
           {
             dayKey: this.dayKey,
-            marketKey: mkey,
+            assetKey: assetKey,
+            marketKey: marketKey,
             entryPrice: cur.entryPrice,
             exitPrice: safePrice,
             sharesSold,
@@ -1020,18 +1023,18 @@ export class PolymarketExecutor {
       }
 
       const remaining = Math.max(0, open - adjustedNotional);
-      this.openNotionalByMarket.set(mkey, remaining);
+      this.openNotionalByMarket.set(assetKey, remaining);
       if (remaining <= 0) {
-        this.openPositions.delete(mkey);
-        await deleteOpenPosition(mkey);
+        this.openPositions.delete(assetKey);
+        await deleteOpenPosition(assetKey);
       } else {
         if (cur) {
           const remainingShares = Math.max(0, cur.shares - shares);
           const updatedPosition: OpenPosition = { ...cur, notionalUsdc: remaining, shares: remainingShares };
-          this.openPositions.set(mkey, updatedPosition);
+          this.openPositions.set(assetKey, updatedPosition);
 
           await upsertOpenPosition({
-            market_key: mkey,
+            market_key: marketKey,
             asset_id: cur.assetId,
             outcome: cur.outcome,
             notional_usdc: remaining,
