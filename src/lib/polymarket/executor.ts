@@ -561,7 +561,71 @@ export class PolymarketExecutor {
       );
     }
 
-    const shares = notional / desiredPrice;
+    let shares = notional / desiredPrice;
+    let adjustedNotional = notional;
+
+    // Minimum shares validation (exchange requirement, typically 5 shares)
+    const minSharesPerOrder = Number(process.env.MIN_SHARES_PER_ORDER ?? '5');
+    if (shares < minSharesPerOrder) {
+      // Calculate minimum notional needed to reach minimum shares
+      const minNotional = minSharesPerOrder * desiredPrice;
+
+      // Check if we can adjust notional to meet minimum without violating limits
+      const canAdjust = minNotional <= this.maxUsdcPerTrade;
+
+      if (!canAdjust) {
+        logger.warn(
+          {
+            assetId: signal.assetId,
+            desiredPrice,
+            calculatedShares: shares,
+            minSharesPerOrder,
+            originalNotional: notional,
+            minNotionalNeeded: minNotional,
+            maxUsdcPerTrade: this.maxUsdcPerTrade,
+          },
+          'SKIPPING: Order too small (shares < minimum). Increase MAX_MY_USDC_PER_SIGNAL or maxUsdcPerTrade.'
+        );
+        return;
+      }
+
+      // Re-check daily notional limit with adjusted value
+      const dailyLimit = await getDailyLimit(this.dayKey);
+      const currentDailyNotional = dailyLimit?.notional_usdc ? Number(dailyLimit.notional_usdc) : 0;
+
+      if (this.maxDailyNotionalUsdc > 0 && currentDailyNotional + minNotional > this.maxDailyNotionalUsdc) {
+        logger.warn(
+          {
+            assetId: signal.assetId,
+            desiredPrice,
+            calculatedShares: shares,
+            minSharesPerOrder,
+            originalNotional: notional,
+            minNotionalNeeded: minNotional,
+            currentDailyNotional,
+            maxDailyNotionalUsdc: this.maxDailyNotionalUsdc,
+          },
+          'SKIPPING: Adjusting to minimum shares would exceed daily notional limit'
+        );
+        return;
+      }
+
+      // Adjust notional to meet minimum shares requirement
+      adjustedNotional = minNotional;
+      shares = minSharesPerOrder;
+
+      logger.info(
+        {
+          assetId: signal.assetId,
+          originalNotional: notional,
+          adjustedNotional,
+          originalShares: notional / desiredPrice,
+          adjustedShares: shares,
+          minSharesPerOrder,
+        },
+        'Adjusted notional to meet minimum shares requirement'
+      );
+    }
 
     // Open-notional guard (approximate): only count BUY notional towards open exposure.
     const mkey = (signal.market ?? signal.assetId).toLowerCase();
@@ -576,9 +640,9 @@ export class PolymarketExecutor {
       return;
     }
 
-    if (signal.side === 'BUY' && open + notional > this.maxOpenUsdcPerMarket) {
+    if (signal.side === 'BUY' && open + adjustedNotional > this.maxOpenUsdcPerMarket) {
       logger.warn(
-        { market: signal.market, assetId: signal.assetId, openUsdc: open, attempted: notional, max: this.maxOpenUsdcPerMarket },
+        { market: signal.market, assetId: signal.assetId, openUsdc: open, attempted: adjustedNotional, max: this.maxOpenUsdcPerMarket },
         'skipping: maxOpenUsdcPerMarket exceeded'
       );
       return;
@@ -591,8 +655,9 @@ export class PolymarketExecutor {
         assetId: signal.assetId,
         side: signal.side,
         price,
-        notional,
+        notional: adjustedNotional,
         shares,
+        minSharesPerOrder,
       },
       'placing order'
     );
@@ -656,7 +721,7 @@ export class PolymarketExecutor {
       market: signal.market,
       asset_id: signal.assetId,
       side: signal.side,
-      notional_usdc: notional,
+      notional_usdc: adjustedNotional,
       shares,
       price: safePrice,
       order_id: order?.orderID || order?.id,
@@ -666,11 +731,11 @@ export class PolymarketExecutor {
     };
 
     await recordSignalExecution(executedSignal);
-    await incrementDailyNotional(this.dayKey, notional);
+    await incrementDailyNotional(this.dayKey, adjustedNotional);
 
-    this.dailyNotionalUsdc += notional;
+    this.dailyNotionalUsdc += adjustedNotional;
     if (signal.side === 'BUY') {
-      this.openNotionalByMarket.set(mkey, open + notional);
+      this.openNotionalByMarket.set(mkey, open + adjustedNotional);
 
       const nowMs = Date.now();
       let cur = this.openPositions.get(mkey);
@@ -685,7 +750,7 @@ export class PolymarketExecutor {
           marketKey: mkey,
           assetId: signal.assetId,
           outcome: signal.outcome,
-          notionalUsdc: open + notional,
+          notionalUsdc: open + adjustedNotional,
           shares,
           entryPrice: safePrice,
           bestPrice: safePrice,
@@ -700,7 +765,7 @@ export class PolymarketExecutor {
           market_key: mkey,
           asset_id: signal.assetId,
           outcome: signal.outcome,
-          notional_usdc: open + notional,
+          notional_usdc: open + adjustedNotional,
           shares,
           entry_price: safePrice,
           best_price: safePrice,
@@ -711,8 +776,8 @@ export class PolymarketExecutor {
         });
       } else {
         const prevNotional = Math.max(0, cur.notionalUsdc);
-        const newNotional = open + notional;
-        const avgEntry = newNotional > 0 ? (cur.entryPrice * prevNotional + safePrice * notional) / newNotional : safePrice;
+        const newNotional = open + adjustedNotional;
+        const avgEntry = newNotional > 0 ? (cur.entryPrice * prevNotional + safePrice * adjustedNotional) / newNotional : safePrice;
         const updatedPosition: OpenPosition = {
           marketKey: mkey,
           assetId: signal.assetId,
@@ -772,7 +837,7 @@ export class PolymarketExecutor {
         );
       }
 
-      const remaining = Math.max(0, open - notional);
+      const remaining = Math.max(0, open - adjustedNotional);
       this.openNotionalByMarket.set(mkey, remaining);
       if (remaining <= 0) {
         this.openPositions.delete(mkey);
