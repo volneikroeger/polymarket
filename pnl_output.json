@@ -1,5 +1,0 @@
-> polymarket-copytrader@1.0.0 pnl-report
-> tsx src/pnlReport.ts
-
-{"level":40,"time":1770747630398,"pid":120455,"hostname":"srv1345916","results":[{"user":"0x20D8dCb0B3b3bEbcf06f26736c217e67422cDd23","realizedPnlUsdc":0,"realizedTrades":0,"wins":0,"losses":0,"openTokens":0,"fetched":0},{"user":"0xd9d712fd23e174ec269f4a9527493e89af8e4fba","realizedPnlUsdc":13.2101,"realizedTrades":36,"wins":33,"losses":3,"openTokens":6,"fetched":77}],"msg":"PnL report (FIFO, approximate; excludes fees)"}
-{"results":[{"user":"0x20D8dCb0B3b3bEbcf06f26736c217e67422cDd23","realizedPnlUsdc":0,"realizedTrades":0,"wins":0,"losses":0,"openTokens":0,"fetched":0},{"user":"0xd9d712fd23e174ec269f4a9527493e89af8e4fba","realizedPnlUsdc":13.2101,"realizedTrades":36,"wins":33,"losses":3,"openTokens":6,"fetched":77}]}

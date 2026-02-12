@@ -30,10 +30,10 @@ scanner:
 # Risk Management Settings
 risk:
   # Maximum USDC per trade
-  maxUsdcPerTrade: 5
+  maxUsdcPerTrade: 1
 
   # Maximum number of active positions
-  maxActivePositions: 5
+  maxActivePositions: 10
 
   # Stop-loss threshold: exit 100% if odds drop by this percentage
   stopLossPercent: 20

@@ -1,83 +1,87 @@
-# polymarket-copytrader
+# Polymarket Copy Trading Bot
 
-Fast-ish copy trading scaffold for Polymarket (CLOB).
+Bot simples para copiar trades de traders específicos no Polymarket.
 
-## Important limitation (copying other wallets)
+## 🎯 Traders Monitorados
 
-Polymarket's **authenticated** websocket `USER` channel only emits events for **your own API key**.
-The public `MARKET` channel does **not** include trader identity.
+O bot está configurado para copiar 4 traders:
 
-That means: **you cannot reliably copy another wallet's order placements immediately at placement-time** using only the public CLOB websockets.
+1. **0xa3e9a711841e655def080044768452b60f4263d0** - 91.5% WR, 20.13% ROI
+2. **0x095dcfb123a4bc035ee6b0d624bab0cc964352cf** - 77% WR, 2.35% ROI, $2M volume
+3. **0x6d3c5bd13984b2de47c3a88ddc455309aab3d294** - 76% WR, 0.17% ROI
+4. **0x0c0e270cf879583d6a0142fc817e05b768d0434e** - 92% WR, 0.01% ROI, $19M volume
 
-What we *can* do without private access:
+## ⚙️ Configuração
 
-- Mirror **trader position / trade history changes** as soon as they are observable via indexed/on-chain sources (subgraph / on-chain events). This is usually **seconds** latency, not milliseconds.
+### Tamanho de Trade
+- **Mínimo por trade**: $1 USDC
+- **Máximo por trade**: $1 USDC
+- **Máximo de posições ativas**: 10
 
-If you have access to a private feed / shared API keys (rare), we can upgrade to true “copy at placement”.
+### Arquivos Importantes
+- `.env` - Variáveis de ambiente e credenciais
+- `high-confidence-config.yml` - Configuração dos traders e parâmetros de risco
 
-## Setup
+## 🚀 Como Usar
 
+### Iniciar o Bot
 ```bash
-cd polymarket-copytrader
-cp .env.example .env
-cp config.example.yml config.yml
+npm run copy-traders
+```
+
+### Build
+```bash
+npm run build
+```
+
+### Desenvolvimento
+```bash
 npm run dev
 ```
 
-### Env
+## 📊 Como Funciona
 
-- `PRIVATE_KEY` (required)
-- `SIGNATURE_TYPE` and `FUNDER` depend on how your Polymarket account wallet is set up
-- `ENABLE_TRADING=false` by default
+1. **Monitoramento**: O bot verifica a cada 30 segundos as atividades dos traders via API do Polymarket
+2. **Detecção**: Quando um trader faz uma compra (BUY), o bot detecta
+3. **Cópia**: O bot replica o trade com $1 USDC
+4. **Proteção**: Trades de venda (SELL) só são copiados se temos uma posição aberta no mercado
 
-## Features
+## 🔒 Segurança
 
-### High-Confidence Market Scanner (Strategy A)
+- ✅ Só copia BUY orders
+- ✅ Só copia SELL orders se temos posição aberta
+- ✅ Máximo de $1 por trade
+- ✅ Limite de 10 posições ativas
+- ✅ Stop-loss de 50 USDC/dia
 
-Automatically discovers and trades high-probability markets (75-95% odds) with intelligent stop-loss management:
+## 📝 Estrutura do Projeto
 
-- Real-time market scanning with configurable filters
-- Multi-level dynamic stop-loss (alert, partial exit, full exit)
-- Take-profit and trailing stop mechanisms
-- Risk management with daily limits and position sizing
-- Paper trading mode for testing
-
-```bash
-npm run high-confidence
+```
+src/
+├── index.ts                          # Ponto de entrada principal
+├── traderCopyBot.ts                  # Bot de cópia de traders
+└── lib/
+    ├── copyTradingConfig.ts          # Loader de configuração
+    ├── database.ts                   # Integração Supabase
+    ├── logger.ts                     # Sistema de logs
+    ├── polymarket/
+    │   ├── api.ts                    # Cliente API Polymarket
+    │   └── executor.ts               # Executor de ordens
+    └── signals/
+        ├── traderPositionMirror.ts   # Monitor de posições dos traders
+        └── types.ts                  # Tipos TypeScript
 ```
 
-See [docs/HIGH_CONFIDENCE_TRADING.md](docs/HIGH_CONFIDENCE_TRADING.md) for full documentation.
+## 🗄️ Banco de Dados
 
-### Trader Discovery & Ranking (Strategies B & C)
+O bot usa Supabase para rastrear:
+- **executed_signals**: Trades executados (evita duplicatas)
+- **open_positions**: Posições abertas (tracking de P&L)
+- **daily_limits**: Limites diários (proteção de risco)
 
-Discover, analyze, and rank top Polymarket traders for copy trading:
+## ⚠️ Importante
 
-- Automated discovery of top traders from leaderboard
-- Comprehensive performance analysis (win rate, ROI, consistency)
-- Smart ranking system with weighted metrics
-- Historical performance tracking
-- Filtering and recommendation system
-
-```bash
-# Discover new traders
-npm run discover-traders
-
-# View ranked traders
-npm run rank-traders
-
-# Compare specific traders
-npm run compare-traders 0xWALLET1 0xWALLET2
-```
-
-### Other Tools
-
-- `npm run arb-scanner` - Find arbitrage opportunities
-- `npm run pnl-report` - Generate P&L reports
-- `npm run quant-bot` - Run quantitative trading bot
-
-## Status
-
-- Executor: scaffolded using `@polymarket/clob-client`
-- High-Confidence Scanner: **IMPLEMENTED**
-- Trader Discovery: **IMPLEMENTED**
-- Copy Trading: requires signal source implementation
+- O bot só copia BUY orders instantaneamente
+- SELL orders só são copiados se temos a posição correspondente
+- Traders podem ter posições antigas que não copiaremos
+- Isso é normal e protege contra vender o que não temos

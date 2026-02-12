@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { logger } from './lib/logger.js';
-import { loadHighConfidenceConfig } from './lib/highConfidenceConfig.js';
+import { loadCopyTradingConfig } from './lib/copyTradingConfig.js';
 import { TraderPositionMirror } from './lib/signals/traderPositionMirror.js';
 import { PolymarketExecutor } from './lib/polymarket/executor.js';
 import type { CopySignal } from './lib/signals/types.js';
@@ -8,8 +8,8 @@ import type { CopySignal } from './lib/signals/types.js';
 async function main() {
   logger.info('Starting Trader Copy Bot');
 
-  const configPath = process.env.HIGH_CONFIDENCE_CONFIG || 'high-confidence-config.yml';
-  const config = loadHighConfidenceConfig(configPath);
+  const configPath = process.env.COPY_TRADING_CONFIG || 'high-confidence-config.yml';
+  const config = loadCopyTradingConfig(configPath);
 
   if (!config.traders || config.traders.length === 0) {
     logger.error('No traders configured. Add traders to high-confidence-config.yml');
