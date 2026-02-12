@@ -72,7 +72,7 @@ export class PolymarketExecutor {
   private readonly circuitBreakerCooldownMs: number;
 
   // Entry throttles / anti-overtrading
-  private readonly maxBuysPerMarket: number;
+  private readonly maxBuysPerAsset: number;
   private readonly buyCooldownMs: number;
   private readonly buyMinPriceDeltaAbs: number;
 
@@ -112,8 +112,9 @@ export class PolymarketExecutor {
     this.maxConsecutiveFailures = Number(process.env.MAX_CONSECUTIVE_ORDER_FAILURES ?? '20');
     this.circuitBreakerCooldownMs = Number(process.env.CIRCUIT_BREAKER_COOLDOWN_MS ?? String(5 * 60 * 1000)); // 5 min default
 
-    // One-position-per-market v2: allow N buys per market (default 1). Backward compatible with
-    // ONE_POSITION_PER_MARKET=true.
+    // One-position-per-asset v2: allow N buys per asset (default 1). This allows multiple
+    // positions in different assets of the same market. Backward compatible with
+    // ONE_POSITION_PER_MARKET=true and MAX_BUYS_PER_MARKET env vars.
     const rawOpm = String(process.env.ONE_POSITION_PER_MARKET ?? '').trim().toLowerCase();
     const envMaxBuys = Number(process.env.MAX_BUYS_PER_MARKET ?? '');
     let maxBuys = 1;
@@ -125,7 +126,7 @@ export class PolymarketExecutor {
       const n = Number(rawOpm);
       if (Number.isFinite(n) && n > 0) maxBuys = Math.floor(n);
     }
-    this.maxBuysPerMarket = Math.max(1, maxBuys);
+    this.maxBuysPerAsset = Math.max(1, maxBuys);
 
     // Anti-duplicate guard when a trader spams near-identical BUYs.
     this.buyCooldownMs = Number(process.env.BUY_COOLDOWN_MS ?? String(60 * 1000));
@@ -413,36 +414,30 @@ export class PolymarketExecutor {
       return;
     }
 
-    // Never attempt to SELL unless we believe we have an open position for this market.
-    // When mirroring raw TRADE events, we can see trader SELLs for markets we never entered.
+    // Never attempt to SELL unless we believe we have an open position for this asset.
+    // When mirroring raw TRADE events, we can see trader SELLs for assets we never entered.
     if (String(signal.side).toUpperCase() === 'SELL') {
-      const key = String(signal.market ?? '').toLowerCase();
+      const key = String(signal.assetId).toLowerCase();
       const pos = this.openPositions.get(key);
       if (!pos || pos.notionalUsdc <= 0) {
-        logger.warn({ trader: signal.trader, market: signal.market, assetId: signal.assetId }, 'skipping SELL: no open position');
-        return;
-      }
-      if (pos.assetId && String(pos.assetId) !== String(signal.assetId)) {
-        logger.warn(
-          { trader: signal.trader, market: signal.market, assetId: signal.assetId, posAssetId: pos.assetId },
-          'skipping SELL: assetId mismatch vs tracked position'
-        );
+        logger.warn({ trader: signal.trader, market: signal.market, assetId: signal.assetId }, 'skipping SELL: no open position for this asset');
         return;
       }
     }
 
     this.resetDailyIfNeeded(Date.now());
 
-    // Anti-overtrading: allow at most N BUYs per market (default 1). If already in this market,
-    // only allow an additional BUY when it is sufficiently separated by time and/or price.
+    // Anti-overtrading: allow at most N BUYs per asset (default 1). This allows buying different
+    // assets in the same market, but prevents multiple entries in the same asset.
+    // Only allow an additional BUY when it is sufficiently separated by time and/or price.
     if (String(signal.side).toUpperCase() === 'BUY') {
-      const key = String(signal.market ?? '').toLowerCase();
+      const key = String(signal.assetId).toLowerCase();
       const pos = this.openPositions.get(key);
       if (pos && pos.notionalUsdc > 0) {
-        if (pos.buysCount >= this.maxBuysPerMarket) {
+        if (pos.buysCount >= this.maxBuysPerAsset) {
           logger.warn(
-            { trader: signal.trader, market: signal.market, assetId: signal.assetId, buysCount: pos.buysCount, maxBuysPerMarket: this.maxBuysPerMarket },
-            'skipping BUY: max buys per market reached'
+            { trader: signal.trader, market: signal.market, assetId: signal.assetId, buysCount: pos.buysCount, maxBuysPerAsset: this.maxBuysPerAsset },
+            'skipping BUY: max buys per asset reached'
           );
           return;
         }
@@ -785,7 +780,8 @@ export class PolymarketExecutor {
     }
 
     // Open-notional guard (approximate): only count BUY notional towards open exposure.
-    const mkey = (signal.market ?? signal.assetId).toLowerCase();
+    // Track positions by assetId to allow multiple positions in different assets of the same market.
+    const mkey = String(signal.assetId).toLowerCase();
     const open = this.openNotionalByMarket.get(mkey) ?? 0;
 
     const activeMarkets = [...this.openNotionalByMarket.values()].filter((v) => v > 0).length;
