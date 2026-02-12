@@ -68,6 +68,7 @@ export class PolymarketExecutor {
 
   // Circuit breaker
   private readonly maxConsecutiveFailures: number;
+  private readonly circuitBreakerCooldownMs: number;
 
   // Entry throttles / anti-overtrading
   private readonly maxBuysPerMarket: number;
@@ -83,6 +84,7 @@ export class PolymarketExecutor {
   private dailyWindowStartMs = Date.now();
   private consecutiveOrderFailures = 0;
   private tradingHalted = false;
+  private circuitBreakerTrippedAtMs = 0;
 
   private constructor(
     private readonly client: ClobClient,
@@ -106,7 +108,8 @@ export class PolymarketExecutor {
     this.maxSpreadAbs = Number(process.env.MAX_SPREAD_ABS ?? '0'); // 0 disables
     this.maxSpreadBps = Number(process.env.MAX_SPREAD_BPS ?? '0'); // 0 disables
 
-    this.maxConsecutiveFailures = Number(process.env.MAX_CONSECUTIVE_ORDER_FAILURES ?? '3');
+    this.maxConsecutiveFailures = Number(process.env.MAX_CONSECUTIVE_ORDER_FAILURES ?? '20');
+    this.circuitBreakerCooldownMs = Number(process.env.CIRCUIT_BREAKER_COOLDOWN_MS ?? String(5 * 60 * 1000)); // 5 min default
 
     // One-position-per-market v2: allow N buys per market (default 1). Backward compatible with
     // ONE_POSITION_PER_MARKET=true.
@@ -344,7 +347,39 @@ export class PolymarketExecutor {
 
   private haltTrading(reason: string, context?: any) {
     this.tradingHalted = true;
-    logger.error({ reason, ...(context ? { context } : {}) }, 'CIRCUIT BREAKER: trading halted for this process');
+    this.circuitBreakerTrippedAtMs = Date.now();
+    const cooldownMinutes = (this.circuitBreakerCooldownMs / 1000 / 60).toFixed(1);
+    logger.error(
+      {
+        reason,
+        consecutiveFailures: this.consecutiveOrderFailures,
+        maxFailures: this.maxConsecutiveFailures,
+        autoResetInMinutes: cooldownMinutes,
+        ...(context ? { context } : {}),
+      },
+      `CIRCUIT BREAKER TRIPPED: Trading halted. Will auto-reset in ${cooldownMinutes} minutes.`
+    );
+  }
+
+  private resetCircuitBreakerIfCooledDown() {
+    if (!this.tradingHalted) return;
+
+    const nowMs = Date.now();
+    const elapsed = nowMs - this.circuitBreakerTrippedAtMs;
+
+    if (elapsed >= this.circuitBreakerCooldownMs) {
+      this.tradingHalted = false;
+      this.consecutiveOrderFailures = 0;
+      this.circuitBreakerTrippedAtMs = 0;
+      const elapsedMinutes = (elapsed / 1000 / 60).toFixed(1);
+      logger.warn(
+        {
+          elapsedMinutes,
+          cooldownMinutes: (this.circuitBreakerCooldownMs / 1000 / 60).toFixed(1),
+        },
+        'CIRCUIT BREAKER RESET: Trading resumed after cooldown period.'
+      );
+    }
   }
 
   async executeSignal(signal: CopySignal) {
@@ -352,8 +387,23 @@ export class PolymarketExecutor {
       logger.warn('Trading disabled (ENABLE_TRADING=false or paper mode)');
       return;
     }
+
+    // Check if circuit breaker should auto-reset after cooldown
+    this.resetCircuitBreakerIfCooledDown();
+
     if (this.tradingHalted) {
-      logger.error({ trader: signal.trader, market: signal.market, assetId: signal.assetId }, 'trading halted (circuit breaker tripped); skipping');
+      const elapsed = Date.now() - this.circuitBreakerTrippedAtMs;
+      const remainingMs = this.circuitBreakerCooldownMs - elapsed;
+      const remainingMinutes = Math.max(0, remainingMs / 1000 / 60).toFixed(1);
+      logger.error(
+        {
+          trader: signal.trader,
+          market: signal.market,
+          assetId: signal.assetId,
+          remainingMinutes,
+        },
+        `Trading halted (circuit breaker). Auto-reset in ${remainingMinutes} minutes.`
+      );
       return;
     }
 
@@ -561,6 +611,60 @@ export class PolymarketExecutor {
       );
     }
 
+    // Minimum profit margin filter: reject BUY orders with insufficient ROI potential.
+    // Only applies to entry orders (BUY), not exits (SELL).
+    if (String(signal.side).toUpperCase() === 'BUY') {
+      const minProfitMarginPercent = Number(process.env.MIN_PROFIT_MARGIN_PERCENT ?? '0');
+      if (minProfitMarginPercent > 0) {
+        // In Polymarket, each share pays $1.00 if it wins.
+        // Profit per share = $1.00 - entry_price
+        // ROI = ((profit per share) / entry_price) * 100
+        const profitPerShare = 1.0 - desiredPrice;
+        const roiPercent = (profitPerShare / desiredPrice) * 100;
+
+        if (roiPercent < minProfitMarginPercent) {
+          const potentialShares = notional / desiredPrice;
+          const maxPayout = potentialShares * 1.0;
+          const potentialProfit = maxPayout - notional;
+
+          logger.warn(
+            {
+              assetId: signal.assetId,
+              market: signal.market,
+              price: desiredPrice,
+              notional,
+              potentialShares: potentialShares.toFixed(2),
+              investment: notional.toFixed(2),
+              maxPayout: maxPayout.toFixed(2),
+              potentialProfit: potentialProfit.toFixed(2),
+              roiPercent: roiPercent.toFixed(2),
+              minRequired: minProfitMarginPercent,
+            },
+            'SKIPPING: Profit margin too low (insufficient ROI). Betting $' +
+              notional.toFixed(2) +
+              ' to win only $' +
+              potentialProfit.toFixed(2) +
+              ' (' +
+              roiPercent.toFixed(1) +
+              '% ROI < ' +
+              minProfitMarginPercent +
+              '% minimum)'
+          );
+          return;
+        }
+
+        logger.debug(
+          {
+            assetId: signal.assetId,
+            price: desiredPrice,
+            roiPercent: roiPercent.toFixed(2),
+            minRequired: minProfitMarginPercent,
+          },
+          'Profit margin acceptable'
+        );
+      }
+    }
+
     let shares = notional / desiredPrice;
     let adjustedNotional = notional;
 
@@ -690,8 +794,24 @@ export class PolymarketExecutor {
       );
     } catch (err) {
       this.consecutiveOrderFailures += 1;
-      logger.error({ err, assetId: signal.assetId, safePrice, shares, consecutiveOrderFailures: this.consecutiveOrderFailures }, 'createAndPostOrder threw');
-      if (this.consecutiveOrderFailures >= this.maxConsecutiveFailures) {
+      const errMsg = String(err).toLowerCase();
+      const isCritical = errMsg.includes('invalid signature') || errMsg.includes('unauthorized') || errMsg.includes('forbidden');
+
+      logger.error(
+        {
+          err,
+          assetId: signal.assetId,
+          safePrice,
+          shares,
+          failureProgress: `${this.consecutiveOrderFailures}/${this.maxConsecutiveFailures}`,
+          isCritical,
+        },
+        `Order failure ${this.consecutiveOrderFailures}/${this.maxConsecutiveFailures}: createAndPostOrder threw`
+      );
+
+      if (isCritical) {
+        this.haltTrading('critical order error (invalid signature or auth)', { error: String(err) });
+      } else if (this.consecutiveOrderFailures >= this.maxConsecutiveFailures) {
         this.haltTrading('too many consecutive order failures (throws)', { maxConsecutiveFailures: this.maxConsecutiveFailures });
       }
       return;
@@ -700,11 +820,20 @@ export class PolymarketExecutor {
     // Update simple counters only on success.
     if (order?.error) {
       this.consecutiveOrderFailures += 1;
-      logger.error({ order, consecutiveOrderFailures: this.consecutiveOrderFailures }, 'order rejected');
+      const errMsg = String(order?.error ?? '').toLowerCase();
+      const isCritical = errMsg.includes('invalid signature') || errMsg.includes('unauthorized') || errMsg.includes('forbidden');
 
-      const errMsg = String(order?.error ?? '');
-      if (errMsg.toLowerCase().includes('invalid signature')) {
-        this.haltTrading('invalid signature');
+      logger.error(
+        {
+          order,
+          failureProgress: `${this.consecutiveOrderFailures}/${this.maxConsecutiveFailures}`,
+          isCritical,
+        },
+        `Order failure ${this.consecutiveOrderFailures}/${this.maxConsecutiveFailures}: order rejected`
+      );
+
+      if (isCritical) {
+        this.haltTrading('critical order error (invalid signature or auth)', { error: order.error });
       } else if (this.consecutiveOrderFailures >= this.maxConsecutiveFailures) {
         this.haltTrading('too many consecutive order failures', { maxConsecutiveFailures: this.maxConsecutiveFailures });
       }
